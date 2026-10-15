@@ -1,0 +1,23 @@
+# M2 起使用：qdrant（向量检索）+ postgres（LangGraph checkpoint 持久化）
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: deepresearch
+      POSTGRES_PASSWORD: deepresearch
+      POSTGRES_DB: deepresearch
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+volumes:
+  qdrant_data:
+  pg_data:
