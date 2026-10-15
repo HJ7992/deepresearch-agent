@@ -1,4 +1,5 @@
-"""Environment-driven settings. Real model wiring lands in M1."""
+"""环境变量驱动的配置（有 .env 就读，没有就跳过）。
+真实模型在 M1 接入，Langfuse 观测在 M4 接入。"""
 
 from __future__ import annotations
 
@@ -7,7 +8,7 @@ from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
 
-load_dotenv()  # reads .env when present; no-op otherwise
+load_dotenv()  # 有 .env 就读；没有也不报错
 
 
 @dataclass(frozen=True)
