@@ -14,6 +14,7 @@ import logging
 from .prompts import CRITIC_SYSTEM, PLANNER_SYSTEM, RESEARCHER_SYSTEM, WRITER_SYSTEM
 from .schemas import CriticVerdict, SubQuestions
 from .state import AgentState
+from .structured import StructuredCaller
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ def _text(message) -> str:
 
 def make_planner(llm):
     """规划节点：把问题拆成 2-4 个可独立回答的子问题。"""
-    structured = llm.with_structured_output(SubQuestions)
+    structured = StructuredCaller(llm, SubQuestions)
 
     def planner(state: AgentState) -> dict:
         result = structured.invoke(
@@ -84,7 +85,7 @@ def make_writer(llm):
 def make_critic(llm):
     """审查节点：结构化判定通过/不通过；不通过时给一条具体批评。
     revisions 计数在此自增，作为修订循环的封顶依据。"""
-    structured = llm.with_structured_output(CriticVerdict)
+    structured = StructuredCaller(llm, CriticVerdict)
 
     def critic(state: AgentState) -> dict:
         verdict = structured.invoke(

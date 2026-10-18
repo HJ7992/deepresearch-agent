@@ -33,7 +33,9 @@ class FakeLLM:
         self.chat_calls += 1
         return AIMessage(content=self.replies.pop(0))
 
-    def with_structured_output(self, schema):
+    def with_structured_output(self, schema, **kwargs):
+        # 记录 method 参数，供兼容性回归测试断言
+        self.last_method = kwargs.get("method")
         return FakeStructured(schema, self.structured, self)
 
 
@@ -68,6 +70,8 @@ def test_full_loop_passes_after_one_revision():
     assert out["revised"] is True
     assert llm.chat_calls == 4             # 2 次调研 + 2 次撰写
     assert llm.structured_calls == 3       # 1 次规划 + 2 次审查
+    # 默认端点上首选 function_calling（无需降级）
+    assert llm.last_method == "function_calling"
 
 
 def test_revision_loop_is_capped():
@@ -111,3 +115,66 @@ def test_make_default_model_requires_api_key():
     """没配 key 时报错信息要能指路（而不是晦涩的堆栈）。"""
     with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
         make_default_model(Settings(openai_api_key=None))
+
+
+class OnlyJsonModeLLM(FakeLLM):
+    """模拟 DeepSeek 思考型模型：function_calling 报 400，只接受 json_mode。"""
+
+    def with_structured_output(self, schema, **kwargs):
+        if kwargs.get("method") == "function_calling":
+
+            class _Rejected:
+                @staticmethod
+                def invoke(messages):
+                    raise RuntimeError(
+                        "Error code: 400 - Thinking mode does not support this tool_choice"
+                    )
+
+            return _Rejected()
+        return super().with_structured_output(schema, **kwargs)
+
+
+def test_falls_back_to_json_mode_when_tool_choice_unsupported():
+    """复刻真实故障：端点拒绝 tool_choice 时自动降级到 json_mode，流程照跑。"""
+    llm = OnlyJsonModeLLM(
+        replies=["n1", "n2", "# 报告"],
+        structured=[{"sub_questions": ["Q1", "Q2"]}, {"passed": True, "critique": ""}],
+    )
+    app = build_graph(llm)
+    out = app.invoke({"question": "什么是 RAG？"})
+
+    assert out["report"] == "# 报告"
+    assert out["verdict_passed"] is True
+    assert llm.last_method == "json_mode"
+
+
+class PromptOnlyLLM:
+    """两种原生模式都不支持，只能走 prompted 兜底（纯提示词 + 自己解析）。"""
+
+    def with_structured_output(self, schema, **kwargs):
+        raise RuntimeError("This response_format type is unavailable now")
+
+    def invoke(self, messages):
+        return AIMessage(content='```json\n{"sub_questions": ["Q1", "Q2"]}\n```')
+
+
+def test_falls_back_to_prompted_mode():
+    """最保守端点：原生模式全不支持时，用提示词 + JSON 解析兜底。"""
+    from deepresearch.schemas import SubQuestions
+    from deepresearch.structured import StructuredCaller
+
+    caller = StructuredCaller(PromptOnlyLLM(), SubQuestions)
+    out = caller.invoke([("human", "拆分问题")])
+    assert out.sub_questions == ["Q1", "Q2"]
+
+
+def test_non_compat_error_is_not_swallowed():
+    """401 之类的非兼容性错误必须直接抛出，不能被降级逻辑吞掉。"""
+
+    class AuthFailLLM(FakeLLM):
+        def with_structured_output(self, schema, **kwargs):
+            raise RuntimeError("Error code: 401 - invalid api key")
+
+    app = build_graph(AuthFailLLM())
+    with pytest.raises(RuntimeError, match="401"):
+        app.invoke({"question": "x"})

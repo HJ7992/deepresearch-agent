@@ -42,6 +42,16 @@ uv sync --extra dev
 # 报告打印到终端，同时保存到 reports/ 目录
 ```
 
+## 常见问题
+
+- **报错 `This response_format type is unavailable now` 或
+  `Thinking mode does not support this tool_choice`**：当前端点对结构化输出的支持
+  方式和默认的不同（DeepSeek 思考型模型常见）。项目内置自动降级链
+  `function_calling → json_mode → prompted`，正常会自己落到可用模式；日志里能看到
+  一条「自动降级」警告。想跳过失败尝试，可在 `.env` 设
+  `DEEPRESEARCH_STRUCTURED_MODE=json_mode`。
+- **没配 key 就运行**：会提示 `未配置模型 API key`，按 `.env.example` 建好 `.env` 即可。
+
 ## 架构（目标态）
 
 ```

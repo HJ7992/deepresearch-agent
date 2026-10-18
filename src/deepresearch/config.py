@@ -22,6 +22,12 @@ class Settings:
     model_name: str = field(
         default_factory=lambda: os.getenv("DEEPRESEARCH_MODEL", "gpt-4o-mini")
     )
+    # 结构化输出的首选实现方式。实际调用时有一整条自动降级链
+    # （首选 → json_mode → prompted），所以通常不用改；
+    # DeepSeek 思考型模型不支持 tool_choice，会自动落到 json_mode。
+    structured_mode: str = field(
+        default_factory=lambda: os.getenv("DEEPRESEARCH_STRUCTURED_MODE", "function_calling")
+    )
     langfuse_public_key: str | None = field(
         default_factory=lambda: os.getenv("LANGFUSE_PUBLIC_KEY") or None
     )

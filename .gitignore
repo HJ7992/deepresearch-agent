@@ -10,5 +10,6 @@ build/
 .coverage
 htmlcov/
 .env
+reports/
 .idea/
 .vscode/
