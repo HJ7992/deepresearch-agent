@@ -13,5 +13,7 @@ htmlcov/
 reports/
 .qdrant/
 data/checkpoints.sqlite
+data/checkpoints.sqlite-shm
+data/checkpoints.sqlite-wal
 .idea/
 .vscode/

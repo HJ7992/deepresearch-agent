@@ -77,6 +77,20 @@ docker compose up --build
 # app(8000) + qdrant(6333)；服务端模式下自动使用 QDRANT_URL
 ```
 
+## 网页界面（M5 起）
+
+```bash
+.venv/Scripts/python -m uvicorn deepresearch.api:app --port 8000
+# 浏览器打开 http://127.0.0.1:8000
+```
+
+单页原生 HTML/JS（无构建链，Markdown 渲染库本地内置）：
+
+- 输入问题 → 提交 → 轮询进度 → 渲染 Markdown 报告与引用来源
+- 展示引用覆盖率、tokens、耗时、审查轮次、编造引用（如有）
+- 勾选「人工审核」后，报告生成即暂停，界面直接**批准 / 退回重写**
+- 顶部显示索引就绪状态与片段数
+
 ## 人工审核与断点恢复（M3 起）
 
 ```bash

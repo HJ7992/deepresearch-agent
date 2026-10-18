@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DeepResearch · 多 Agent 调研助手</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <strong>DeepResearch</strong>
+      <span>基于 LangGraph 的多 Agent 调研助手</span>
+    </div>
+    <div class="health" id="health">索引检查中…</div>
+  </header>
+
+  <main>
+    <section class="panel composer">
+      <label for="question">调研问题</label>
+      <textarea id="question" rows="3" placeholder="例如：RAG 和微调应该怎么选？"></textarea>
+      <div class="row spread">
+        <label class="checkbox">
+          <input type="checkbox" id="review" />
+          开启人工审核（HITL）
+        </label>
+        <button id="submit" class="primary">开始调研</button>
+      </div>
+      <p class="hint">完整流水线约 30–90 秒：规划 → 检索 → 撰写 → 引用核验 → 审查</p>
+    </section>
+
+    <section class="panel" id="run-panel" hidden>
+      <div class="row spread">
+        <span class="badge" id="status-badge">排队中</span>
+        <span class="meta" id="meta"></span>
+      </div>
+      <div class="metrics" id="metrics"></div>
+
+      <div class="review-box" id="review-box" hidden>
+        <p><strong>报告已生成，等待人工审核。</strong>
+          批准后进入 critic 终审；退回将按意见重写后再次审核。</p>
+        <textarea id="review-comment" rows="2" placeholder="退回意见（批准时可留空）"></textarea>
+        <div class="row">
+          <button id="approve" class="primary">批准</button>
+          <button id="reject" class="ghost">退回重写</button>
+        </div>
+      </div>
+
+      <article class="report" id="report"></article>
+    </section>
+  </main>
+
+  <script src="/static/vendor/marked.min.js"></script>
+  <script src="/static/vendor/purify.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
