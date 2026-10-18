@@ -1,8 +1,12 @@
 # DeepResearch Agent
 
+[![CI](https://github.com/HJ7992/deepresearch-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/HJ7992/deepresearch-agent/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.12%20%7C%203.13-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+
 基于 LangGraph 的多 Agent 深度调研助手：输入一个调研问题，系统自动完成
-「拆解 → 检索 → 交叉验证 → 写报告 → 自我审查」，带长期记忆、人工审核、
-全链路观测与自建 MCP Server。
+「拆解 → 检索 → 交叉验证 → 写报告 → 自我审查」，带引用核验、人工审核、
+断点恢复、FastAPI 服务与 MCP 接入。
 
 > 完整技术方案见 `../01-主项目技术方案.md`。
 
@@ -123,16 +127,30 @@ uv sync --extra postgres
   `DEEPRESEARCH_STRUCTURED_MODE=json_mode`。
 - **没配 key 就运行**：会提示 `未配置模型 API key`，按 `.env.example` 建好 `.env` 即可。
 
-## 架构（M2 实况）
+## 评测结果（20 题评测集，规则判定）
+
+| 模式 | 题数 | 任务成功率 | 关键词命中 | 引用覆盖率 | 编造引用率 | critic 通过率 | 平均 tokens | 平均耗时 |
+|------|------|-----------|-----------|-----------|-----------|--------------|------------|----------|
+| full（完整流水线） | 20 | 100% | 97% | 92% | 0% | 90% | 18,864 | 33.9s |
+| no_retrieval（关检索，消融） | 6 | 0% | 74% | 0% | 50% | 0% | 11,642 | 29.4s |
+| no_verify（关引用强制，消融） | 6 | 100% | 94% | 92% | 0% | 100% | 18,953 | 35.3s |
+
+**怎么读这张表**：
+- 完整流水线在 20 题上任务成功率 100%（规则判定：关键词命中 ≥0.5、覆盖率 ≥0.6、无编造引用）。
+- **关检索 = 系统失效**：覆盖率归零、一半报告出现编造引用、critic 全部否决——检索是「可溯源」的前提。
+- **关引用强制没有变差**：在本语料上，写作提示词 + critic 已足以约束引用质量，硬门槛
+  的价值是**确定性兜底**（编造编号/低覆盖会被程序拦下并强制重写，单元测试覆盖了这些场景），
+  而不是抬高平均分。这是如实结论，不是每个模块都必然带来指标提升。
+
+> 复现：`.venv/Scripts/python eval/run_eval.py`（逐题落盘，消融加 `--mode`）。
+
+## 架构（M5 实况）
 
 ```
-planner ──► researcher（Qdrant 检索，带编号资料）──► writer（引用 [n]）
-                                                          │
-                                                          ▼
-                              verifier（程序化：覆盖率 + 无效编号）
-                                                          │
-                                                          ▼
-                     critic（LLM 审查，结合核验数据）── 不达标 ──► writer（封顶重写）
-配套：FastAPI 服务 · token/时延计量 · 本地嵌入式/服务端双模式 Qdrant
+planner ──Send 扇出──► researcher × N（并行检索）──► collect（去重+全局重编号）
+      ──► writer（引用 [n]）──► verifier（程序化核验）──► human_gate（人工审核）
+      ──► critic（LLM 审查）── 不达标/被退回 ──► writer（修订封顶）
+配套：FastAPI（提交+轮询）· MCP Server（stdio/HTTP）· SQLite/Postgres checkpoint
+      · token/时延计量 · 20 题评测 + 消融
 ```
 

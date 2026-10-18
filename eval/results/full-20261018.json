@@ -1,0 +1,11 @@
+{
+  "mode": "full",
+  "count": 20,
+  "success_rate": 1.0,
+  "mean_keyword_hit": 0.967,
+  "mean_coverage": 0.918,
+  "invalid_citation_rate": 0.0,
+  "critic_pass_rate": 0.9,
+  "mean_tokens": 18864,
+  "mean_seconds": 33.9
+}

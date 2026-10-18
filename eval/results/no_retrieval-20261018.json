@@ -1,0 +1,11 @@
+{
+  "mode": "no_retrieval",
+  "count": 6,
+  "success_rate": 0.0,
+  "mean_keyword_hit": 0.736,
+  "mean_coverage": 0.0,
+  "invalid_citation_rate": 0.5,
+  "critic_pass_rate": 0.0,
+  "mean_tokens": 11642,
+  "mean_seconds": 29.4
+}
