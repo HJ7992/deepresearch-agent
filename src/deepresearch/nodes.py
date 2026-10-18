@@ -1,18 +1,21 @@
-"""节点工厂：每个工厂接收注入的聊天模型（researcher 还接收检索器），
-返回 LangGraph 需要的 (state) -> dict 节点函数。
+"""节点工厂：每个工厂接收注入的依赖（模型/检索器），返回 LangGraph 需要的
+(state) -> dict 节点函数。
 
-设计要点（面试话术）：
-- planner/critic 用 StructuredCaller 结构化输出（带自动降级，见 structured.py）；
-- researcher 先检索、再带编号资料作答——从 M2 起报告里的结论都应可溯源；
-- verifier 是程序化核验（正则 + 编号校验 + 覆盖率），确定性、可测试，
-  不依赖「让 LLM 自己检查自己」；
-- researcher 在 M2 里顺序遍历子问题，M3 换成 Send 并行扇出时节点契约不变。
+M3 相比 M2 的变化：
+- researcher 不再一次处理所有子问题，而是由 Send 扇出的单个任务只回答
+  一个子问题，产出 findings（用 operator.add 并行合并）；
+- 新增 collect 节点：按子问题顺序归并 findings，来源按 chunk id 去重，
+  并把各任务自己的局部编号（都从 1 开始）重映射成全局编号；
+- 新增 human_gate 节点：HITL 人工审核，用 interrupt() 暂停、Command(resume=...)
+  恢复；退回时把意见写进 critique，回到 writer 修订。
 """
 
 from __future__ import annotations
 
 import logging
 import re
+
+from langgraph.types import interrupt
 
 from .config import settings
 from .prompts import CRITIC_SYSTEM, PLANNER_SYSTEM, RESEARCHER_SYSTEM, WRITER_SYSTEM
@@ -30,6 +33,9 @@ CITATION_RE = re.compile(r"\[(\d+)\]")
 
 # 少于这个长度的段落不算「结论」，不参与覆盖率统计（过滤标题、列表符号等）
 MIN_CLAIM_CHARS = 20
+
+# 重编号时用的临时占位符，避免 [1]→[2] 又被 [2]→[3] 连锁替换
+_PLACEHOLDER = "⟦{}⟧"
 
 
 def _text(message) -> str:
@@ -54,34 +60,81 @@ def make_planner(llm):
 
 
 def make_researcher(llm, retriever):
-    """调研节点：逐个子问题检索资料，带编号作答；没有资料时如实说明。"""
+    """调研节点（Send 扇出后的单个任务）：只回答 state['sub_question']，
+    检索到的资料按局部编号 1..k 引用，由 collect 统一重编号。"""
 
     def researcher(state: AgentState) -> dict:
-        notes: list[str] = []
+        sq = state["sub_question"]
+        chunks = retriever.search(sq) if retriever else []
+
         sources: list[dict] = []
-        seen: dict[str, int] = {}  # chunk id -> 编号（跨子问题去重）
+        parts: list[str] = []
+        for i, c in enumerate(chunks, start=1):
+            sources.append(
+                {"n": i, "id": c.id, "source": c.source, "text": c.text[:300]}
+            )
+            parts.append(f"[{i}] 来源：{c.source}\n{c.text}")
 
-        for sq in state["sub_questions"]:
-            chunks = retriever.search(sq) if retriever else []
-            if chunks:
-                parts = []
-                for c in chunks:
-                    if c.id not in seen:
-                        seen[c.id] = len(sources) + 1
-                        sources.append(
-                            {"n": seen[c.id], "source": c.source, "text": c.text[:300]}
-                        )
-                    parts.append(f"[{seen[c.id]}] 来源：{c.source}\n{c.text}")
-                human = f"子问题：{sq}\n\n资料片段：\n\n" + "\n\n".join(parts)
-            else:
-                human = f"子问题：{sq}\n\n（资料库中没有检索到相关内容）"
-            reply = llm.invoke([("system", RESEARCHER_SYSTEM), ("human", human)])
-            notes.append(f"## {sq}\n\n{_text(reply).strip()}")
+        if parts:
+            human = f"子问题：{sq}\n\n资料片段：\n\n" + "\n\n".join(parts)
+        else:
+            human = f"子问题：{sq}\n\n（资料库中没有检索到相关内容）"
 
-        logger.info("researcher: %d 条笔记，%d 条来源", len(notes), len(sources))
-        return {"notes": notes, "sources": sources}
+        reply = llm.invoke([("system", RESEARCHER_SYSTEM), ("human", human)])
+        logger.info("researcher[%s]: %d 条资料", sq[:20], len(sources))
+        return {
+            "findings": [
+                {
+                    "sub_question": sq,
+                    "text": _text(reply).strip(),
+                    "sources": sources,
+                }
+            ]
+        }
 
     return researcher
+
+
+def make_collect():
+    """归并节点：按子问题顺序合并并行结果，来源去重并全局重编号。
+
+    难点：每个 researcher 的引用编号都是局部的（都从 [1] 开始），
+    合并后必须把笔记里的编号改写成全局编号，否则 verifier 会把它们误判为
+    重复或编造引用。用两段式占位符替换避免连锁替换。
+    """
+
+    def collect(state: AgentState) -> dict:
+        order = {q: i for i, q in enumerate(state.get("sub_questions", []))}
+        findings = sorted(
+            state.get("findings", []), key=lambda f: order.get(f["sub_question"], 0)
+        )
+
+        sources: list[dict] = []
+        seen: dict[str, int] = {}  # chunk id -> 全局编号
+        notes: list[str] = []
+
+        for f in findings:
+            mapping: dict[int, int] = {}
+            for s in f.get("sources", []):
+                if s["id"] in seen:
+                    mapping[s["n"]] = seen[s["id"]]
+                else:
+                    n = len(sources) + 1
+                    seen[s["id"]] = n
+                    sources.append({"n": n, "source": s["source"], "text": s["text"]})
+                    mapping[s["n"]] = n
+
+            text = f["text"]
+            for old, new in mapping.items():
+                text = text.replace(f"[{old}]", _PLACEHOLDER.format(new))
+            for new in set(mapping.values()):
+                text = text.replace(_PLACEHOLDER.format(new), f"[{new}]")
+            notes.append(f"## {f['sub_question']}\n\n{text}")
+
+        logger.info("collect: %d 条笔记，去重后 %d 条来源", len(notes), len(sources))
+        return {"notes": notes, "sources": sources}
+
+    return collect
 
 
 def make_writer(llm):
@@ -89,7 +142,7 @@ def make_writer(llm):
 
     def writer(state: AgentState) -> dict:
         critique = state.get("critique")
-        notes = "\n\n".join(state["notes"])
+        notes = "\n\n".join(state.get("notes", []))
         sources = state.get("sources", [])
         src_desc = (
             "\n".join(f"[{s['n']}] {s['source']}" for s in sources) or "（无可用来源）"
@@ -116,8 +169,6 @@ def make_verifier(min_coverage: float | None = None):
     """核验节点（程序化，不用 LLM）：
     1) 统计结论段落中有有效引用的比例；
     2) 找出报告里引用了、但资料库里不存在的编号（编造引用）。
-
-    阈值在这里只做计算，是否打回由 graph.route_after_critic 统一判断。
     """
     threshold = settings.citation_min_coverage if min_coverage is None else min_coverage
 
@@ -131,9 +182,8 @@ def make_verifier(min_coverage: float | None = None):
             if not p or p.startswith("#"):
                 continue  # 标题不算结论
             body = CITATION_RE.sub("", p).strip()
-            # 去掉引用与列表符号后太短，说明是列表项/来源清单，不算独立结论
             if len(body) < MIN_CLAIM_CHARS:
-                continue
+                continue  # 列表项/来源清单不算独立结论
             claims.append(p)
 
         cited, unsourced, invalid = 0, [], set()
@@ -158,6 +208,37 @@ def make_verifier(min_coverage: float | None = None):
         }
 
     return verifier
+
+
+def make_human_gate(enabled: bool = False):
+    """人工审核门：开启时 interrupt() 暂停执行，等待 Command(resume=decision)。
+
+    decision = {"approved": true/false, "comment": "..."}；退回时把意见写入
+    critique，路由会把流程打回 writer。关闭时直接放行（不影响 CI）。
+    """
+
+    def human_gate(state: AgentState) -> dict:
+        if not enabled:
+            return {}
+        decision = interrupt(
+            {
+                "report": state.get("report", ""),
+                "citation_coverage": state.get("citation_coverage"),
+                "invalid_citations": state.get("invalid_citations", []),
+            }
+        )
+        if isinstance(decision, dict) and decision.get("approved"):
+            logger.info("human_gate: 人工通过")
+            return {"human_approved": True}
+
+        comment = decision.get("comment", "") if isinstance(decision, dict) else ""
+        logger.info("human_gate: 人工退回（%s）", comment or "无意见")
+        return {
+            "human_approved": False,
+            "critique": f"人工退回：{comment or '请按审核意见修改后重新提交'}",
+        }
+
+    return human_gate
 
 
 def make_critic(llm):

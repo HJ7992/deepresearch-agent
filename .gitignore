@@ -12,5 +12,6 @@ htmlcov/
 .env
 reports/
 .qdrant/
+data/checkpoints.sqlite
 .idea/
 .vscode/

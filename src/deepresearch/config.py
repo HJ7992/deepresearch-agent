@@ -55,6 +55,14 @@ class Settings:
     citation_min_coverage: float = field(
         default_factory=lambda: float(os.getenv("DEEPRESEARCH_MIN_COVERAGE", "0.6"))
     )
+    # ---- 持久化（M3） ----
+    # 默认 SQLite（零部署，进程重启可恢复）；配 DATABASE_URL 则用 Postgres
+    checkpoint_db: str = field(
+        default_factory=lambda: os.getenv("DEEPRESEARCH_CHECKPOINT_DB", "data/checkpoints.sqlite")
+    )
+    database_url: str | None = field(
+        default_factory=lambda: os.getenv("DATABASE_URL") or None
+    )
     # 估算成本用（每百万 token 单价，按你的模型计价填）
     price_input_per_mtok: float = field(
         default_factory=lambda: float(os.getenv("DEEPRESEARCH_PRICE_IN", "0"))

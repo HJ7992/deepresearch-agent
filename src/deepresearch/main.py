@@ -1,7 +1,11 @@
-"""命令行入口：python -m deepresearch.main "你的调研问题"
+"""命令行入口。
 
-跑完整流水线，报告存 reports/*.md，计量信息（token/耗时/成本/引用覆盖率）
-存同名 *.json。
+用法：
+  python -m deepresearch.main "你的调研问题"            # 直接跑（无人工审核）
+  python -m deepresearch.main --review "你的调研问题"   # 开启 HITL，人工批准/退回
+  python -m deepresearch.main --resume <thread_id>      # 进程重启后恢复暂停的调研
+
+报告存 reports/*.md，计量信息存同名 *.json。
 """
 
 from __future__ import annotations
@@ -14,7 +18,7 @@ import pathlib
 import re
 
 from .retriever import get_store
-from .runner import run
+from .runner import get_state, resume, run
 
 
 def _slugify(text: str, max_len: int = 40) -> str:
@@ -23,50 +27,96 @@ def _slugify(text: str, max_len: int = 40) -> str:
     return (slug[:max_len].rstrip("-")) or "report"
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="DeepResearch 多 Agent 调研助手")
-    parser.add_argument("question", help="要调研的问题")
-    parser.add_argument("--thread-id", default=None, help="会话线程 ID（默认按时间生成）")
-    parser.add_argument(
-        "--max-revisions", type=int, default=1,
-        help="critic 否决后允许的修订轮数（默认 1）",
-    )
-    args = parser.parse_args()
+def _ask_decision(result: dict) -> dict:
+    """人工审核交互：批准或退回（可附意见）。"""
+    print("\n" + "=" * 64)
+    print("【人工审核】引用覆盖率：", result.get("citation_coverage"))
+    invalid = result.get("invalid_citations") or []
+    if invalid:
+        print("【警告】报告引用了不存在的编号：", invalid)
+    while True:
+        answer = input("批准这份报告？[y=批准 / n=退回] ").strip().lower()
+        if answer in {"y", "n"}:
+            break
+    comment = ""
+    if answer == "n":
+        comment = input("退回意见（可留空）：").strip()
+    return {"approved": answer == "y", "comment": comment}
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
-    result = run(
-        args.question,
-        thread_id=args.thread_id or dt.datetime.now().strftime("run-%Y%m%d-%H%M%S"),
-        max_revisions=args.max_revisions,
-    )
-
+def _save(result: dict, question: str) -> None:
     out_dir = pathlib.Path("reports")
     out_dir.mkdir(exist_ok=True)
-    stem = f"{dt.datetime.now():%Y%m%d-%H%M%S}-{_slugify(args.question)}"
-    (out_dir / f"{stem}.md").write_text(result["report"], encoding="utf-8")
+    stem = f"{dt.datetime.now():%Y%m%d-%H%M%S}-{_slugify(question or 'resume')}"
+    (out_dir / f"{stem}.md").write_text(result.get("report", ""), encoding="utf-8")
     payload = {
-        "question": args.question,
+        "question": question,
         "metrics": result.get("metrics", {}),
         "citation_coverage": result.get("citation_coverage"),
         "invalid_citations": result.get("invalid_citations", []),
         "sources": len(result.get("sources", [])),
         "revisions": result.get("revisions", 0),
         "verdict_passed": result.get("verdict_passed"),
+        "human_approved": result.get("human_approved"),
     }
     (out_dir / f"{stem}.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-
-    print(result["report"])
     print(f"\n[已保存] {out_dir / f'{stem}.md'}")
     m = result.get("metrics", {})
     print(
-        f"[计量] {m.get('llm_calls')} 次调用，"
-        f"{m.get('total_tokens')} tokens，"
-        f"{m.get('llm_seconds')}s，"
-        f"引用覆盖率 {result.get('citation_coverage')}"
+        f"[计量] {m.get('llm_calls')} 次调用，{m.get('total_tokens')} tokens，"
+        f"{m.get('llm_seconds')}s，引用覆盖率 {result.get('citation_coverage')}"
     )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="DeepResearch 多 Agent 调研助手")
+    parser.add_argument("question", nargs="?", help="要调研的问题（--resume 时可不填）")
+    parser.add_argument(
+        "--thread-id", default=None, help="会话线程 ID（默认按时间生成）"
+    )
+    parser.add_argument(
+        "--max-revisions", type=int, default=1, help="critic 否决后允许的修订轮数"
+    )
+    parser.add_argument("--review", action="store_true", help="开启人工审核（HITL）")
+    parser.add_argument(
+        "--resume", metavar="THREAD_ID", default=None,
+        help="恢复暂停的调研（进程重启后续跑）",
+    )
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+
+    # 恢复模式：先打印已有报告，再让人工做决定
+    if args.resume:
+        snapshot = get_state(args.resume)
+        if not snapshot.values:
+            print(f"[错误] 找不到 thread_id={args.resume} 的会话")
+            raise SystemExit(1)
+        print(snapshot.values.get("report", ""))
+        result = resume(args.resume, _ask_decision(snapshot.values), args.max_revisions)
+        thread_id = args.resume
+        question = snapshot.values.get("question", "")
+    else:
+        if not args.question:
+            parser.error("需要提供调研问题（或用 --resume 恢复会话）")
+        thread_id = args.thread_id or dt.datetime.now().strftime("run-%Y%m%d-%H%M%S")
+        result = run(
+            args.question,
+            thread_id=thread_id,
+            max_revisions=args.max_revisions,
+            review=args.review,
+        )
+        question = args.question
+
+    # 可能多次暂停（退回后再次进入人工审核）
+    while result.get("paused"):
+        print(result.get("report", ""))
+        result = resume(thread_id, _ask_decision(result), args.max_revisions)
+
+    print(result.get("report", ""))
+    _save(result, question)
     # 本地嵌入式向量库在进程退出前显式关闭，避免 __del__ 告警
     try:
         get_store().close()

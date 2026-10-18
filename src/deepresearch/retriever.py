@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import atexit
 import hashlib
 import logging
 import os
@@ -129,3 +130,15 @@ def get_store(cfg: Settings | None = None) -> VectorStore:
     if key not in _stores:
         _stores[key] = VectorStore(cfg)
     return _stores[key]
+
+
+def _close_all_stores() -> None:
+    """进程退出时释放本地向量库文件锁，避免 __del__ 告警。"""
+    for store in list(_stores.values()):
+        try:
+            store.close()
+        except Exception:  # noqa: BLE001, S110 — 退出阶段尽力而为，不打印
+            pass
+
+
+atexit.register(_close_all_stores)

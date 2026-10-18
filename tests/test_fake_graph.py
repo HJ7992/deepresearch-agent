@@ -1,8 +1,14 @@
 """用「剧本假模型」测试真实流水线——完整 LangGraph 拓扑、零 API 调用。
 同样的假模型模式让 CI 结果完全确定。"""
 
+import sqlite3
+import threading
+
 import pytest
 from langchain_core.messages import AIMessage
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.types import Command
 
 from deepresearch.config import Settings
 from deepresearch.graph import build_graph
@@ -22,17 +28,28 @@ class FakeStructured:
 
 
 class FakeLLM:
-    """剧本假模型：聊天回复和结构化输出各排一个队列，按调用顺序弹出。"""
+    """剧本假模型：聊天回复和结构化输出各排一个队列，按调用顺序弹出。
 
-    def __init__(self, replies=(), structured=()):
+    并行 researcher 会并发调用 invoke，队列操作加锁保证线程安全；
+    需要「按输入决定回复」时传 responder（例如让每个子问题得到不同答案）。
+    """
+
+    def __init__(self, replies=(), structured=(), responder=None):
         self.replies = list(replies)
         self.structured = list(structured)
+        self.responder = responder
         self.chat_calls = 0
         self.structured_calls = 0
+        self._lock = threading.Lock()
 
     def invoke(self, messages):
-        self.chat_calls += 1
-        return AIMessage(content=self.replies.pop(0))
+        with self._lock:
+            self.chat_calls += 1
+            if self.responder is not None:
+                text = self.responder(messages)
+            else:
+                text = self.replies.pop(0)
+        return AIMessage(content=text)
 
     def with_structured_output(self, schema, **kwargs):
         # 记录 method 参数，供兼容性回归测试断言
@@ -41,17 +58,21 @@ class FakeLLM:
 
 
 class FakeRetriever:
-    """检索桩：固定返回两条资料，researcher 会按编号引用它们。"""
+    """检索桩：默认固定返回两条资料；也可按 query 返回不同资料。"""
 
-    def __init__(self, chunks=None):
+    def __init__(self, chunks=None, by_query=None):
         self.chunks = chunks or [
             RetrievedChunk(id="rag.md#0", text="RAG 是检索增强生成。", source="rag.md"),
             RetrievedChunk(id="ft.md#0", text="微调会改变模型参数。", source="ft.md"),
         ]
+        self.by_query = by_query or {}
         self.queries: list[str] = []
 
     def search(self, query, k=None):
         self.queries.append(query)
+        for key, chunks in self.by_query.items():
+            if key in query:
+                return chunks
         return self.chunks
 
 
@@ -240,3 +261,152 @@ def test_non_compat_error_is_not_swallowed():
     app = build_graph(AuthFailLLM(), retriever=FakeRetriever())
     with pytest.raises(RuntimeError, match="401"):
         app.invoke({"question": "x"})
+
+
+# ---------------------------------------------------------------------------
+# M3：Send 并行扇出、collect 重编号、HITL、跨实例 checkpoint 恢复
+# ---------------------------------------------------------------------------
+
+def _responder_by_subquestion(messages):
+    """根据子问题返回不同答案，避免并行任务抢同一个回复队列。"""
+    prompt = messages[-1][1]
+    for sq in ("Q1", "Q2"):
+        if sq in prompt:
+            return f"结论：{sq} 的要点 [1]"
+    return "结论 [1]"
+
+
+def test_send_fan_out_merges_and_renumbers():
+    """两个并行 researcher 的资料都从 [1] 编号，collect 必须重映射成 [1][2]。"""
+    retriever = FakeRetriever(
+        by_query={
+            "Q1": [RetrievedChunk(id="a#0", text="资料A", source="a.md")],
+            "Q2": [RetrievedChunk(id="b#0", text="资料B", source="b.md")],
+        }
+    )
+    llm = FakeLLM(
+        responder=_responder_by_subquestion,
+        structured=[
+            {"sub_questions": ["Q1", "Q2"]},
+            {"passed": True, "critique": ""},
+        ],
+    )
+    app = build_graph(llm, retriever=retriever)
+    out = app.invoke({"question": "?"})
+
+    # 笔记按子问题顺序合并，编号已全局化
+    assert out["notes"][0].startswith("## Q1")
+    assert "[1]" in out["notes"][0]
+    assert out["notes"][1].startswith("## Q2")
+    assert "[2]" in out["notes"][1]
+    assert [s["source"] for s in out["sources"]] == ["a.md", "b.md"]
+
+
+def test_collect_dedupes_shared_chunk():
+    """两个子问题检索到同一块资料时，来源只保留一份，编号指向同一处。"""
+    shared = [RetrievedChunk(id="same#0", text="同一块资料", source="same.md")]
+    retriever = FakeRetriever(chunks=shared)
+    llm = FakeLLM(
+        responder=_responder_by_subquestion,
+        structured=[
+            {"sub_questions": ["Q1", "Q2"]},
+            {"passed": True, "critique": ""},
+        ],
+    )
+    app = build_graph(llm, retriever=retriever)
+    out = app.invoke({"question": "?"})
+
+    assert len(out["sources"]) == 1
+    assert "[1]" in out["notes"][0] and "[1]" in out["notes"][1]
+
+
+def test_hitl_approve_flow():
+    """开启人工审核：图在 human_gate 暂停，批准后继续到 critic 并结束。"""
+    llm = FakeLLM(
+        replies=["n1", "n2", "# 报告 [1]"],
+        structured=[
+            {"sub_questions": ["Q1", "Q2"]},
+            {"passed": True, "critique": ""},
+        ],
+    )
+    app = build_graph(
+        llm, retriever=FakeRetriever(), checkpointer=InMemorySaver(), enable_review=True
+    )
+    cfg = {"configurable": {"thread_id": "h-approve"}}
+
+    paused = app.invoke({"question": "?"}, cfg)
+    assert "__interrupt__" in paused
+    assert paused["report"].startswith("# 报告")
+
+    done = app.invoke(Command(resume={"approved": True}), cfg)
+    assert done["human_approved"] is True
+    assert done["report"].startswith("# 报告")
+    assert done["verdict_passed"] is True
+
+
+def test_hitl_reject_triggers_revision():
+    """人工退回：意见进入 critique，打回 writer 重写，然后再次等待审核。"""
+    llm = FakeLLM(
+        replies=["n1", "n2", "# 初稿 [1]", "# 修订稿 [1]"],
+        structured=[
+            {"sub_questions": ["Q1", "Q2"]},
+            {"passed": True, "critique": ""},
+            {"passed": True, "critique": ""},
+        ],
+    )
+    app = build_graph(
+        llm, retriever=FakeRetriever(), checkpointer=InMemorySaver(), enable_review=True
+    )
+    cfg = {"configurable": {"thread_id": "h-reject"}}
+
+    first = app.invoke({"question": "?"}, cfg)
+    assert "__interrupt__" in first
+
+    second = app.invoke(
+        Command(resume={"approved": False, "comment": "补充对比数据"}), cfg
+    )
+    assert "__interrupt__" in second          # 修订后再次等待人工
+    assert second["human_approved"] is False
+    assert second["report"] == "# 修订稿 [1]"
+
+    third = app.invoke(Command(resume={"approved": True}), cfg)
+    assert third["human_approved"] is True
+
+
+def test_checkpoint_survives_restart(tmp_path):
+    """模拟进程重启：新连接 + 新 app 用同一 thread_id 续跑，不重跑前端节点。"""
+    db = str(tmp_path / "ckpt.sqlite")
+
+    conn1 = sqlite3.connect(db, check_same_thread=False)
+    saver1 = SqliteSaver(conn1)
+    saver1.setup()
+    llm1 = FakeLLM(
+        replies=["n1", "n2", "# 报告 [1]"],
+        structured=[
+            {"sub_questions": ["Q1", "Q2"]},
+            {"passed": True, "critique": ""},
+        ],
+    )
+    app1 = build_graph(
+        llm1, retriever=FakeRetriever(), checkpointer=saver1, enable_review=True
+    )
+    cfg = {"configurable": {"thread_id": "restart"}}
+
+    first = app1.invoke({"question": "?"}, cfg)
+    assert "__interrupt__" in first
+
+    # 「重启」：新连接、新 app、新的假模型（只准备 critic 的那一次结构化调用）
+    conn2 = sqlite3.connect(db, check_same_thread=False)
+    saver2 = SqliteSaver(conn2)
+    saver2.setup()
+    llm2 = FakeLLM(structured=[{"passed": True, "critique": ""}])
+    app2 = build_graph(
+        llm2, retriever=FakeRetriever(), checkpointer=saver2, enable_review=True
+    )
+
+    resumed = app2.invoke(Command(resume={"approved": True}), cfg)
+    assert resumed["report"].startswith("# 报告")
+    assert resumed["human_approved"] is True
+    # 前端节点没有重跑：只发生了 1 次 LLM 调用（critic）
+    assert llm2.chat_calls == 0
+    assert llm2.structured_calls == 1

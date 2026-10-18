@@ -1,15 +1,15 @@
 """图构建器。
 
-- build_graph(model, retriever)：真实流水线
-  planner → researcher(检索) → writer → verifier(程序化核验) → critic(LLM 审查)
-  → 不达标打回 writer（有修订轮数上限）。
-- build_offline_graph()：不需要 LLM/检索器的桩版本，拓扑一致，用于演示与
-  拓扑冒烟测试。
+M3 流水线：
+  planner ──Send 扇出──► researcher × N（并行，只答一个子问题）
+        ──► collect（去重 + 全局重编号）──► writer
+        ──► verifier（程序化核验）──► human_gate（HITL，可暂停）
+        ──► critic ──不达标/被退回──► writer（修订轮数封顶）
 
 设计要点（面试话术）：
-- 路由条件同时看三件事：critic 是否通过、引用覆盖率是否达标、有没有编造引用；
-- max_revisions 计「修订轮数」：writer 最多跑 1 + max 次，防止永不满意的
-  critic 无限烧钱。
+- Send 是动态扇出：子问题数量在运行时才知道，不能用静态边；
+- 路由条件同时看 critic 结论、引用覆盖率、无效引用、人工审核结果；
+- max_revisions 计「修订轮数」：writer 最多跑 1 + max 次，防止无限烧钱。
 """
 
 from __future__ import annotations
@@ -18,10 +18,13 @@ import logging
 
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Send
 
 from .config import settings
 from .nodes import (
+    make_collect,
     make_critic,
+    make_human_gate,
     make_planner,
     make_researcher,
     make_verifier,
@@ -38,6 +41,7 @@ def build_graph(
     checkpointer=None,
     max_revisions: int = 1,
     min_citation_coverage: float | None = None,
+    enable_review: bool = False,
 ):
     """真实流水线。retriever 为空时 researcher 会如实说明「没有资料」。"""
     threshold = (
@@ -49,20 +53,30 @@ def build_graph(
     g = StateGraph(AgentState)
     g.add_node("planner", make_planner(model))
     g.add_node("researcher", make_researcher(model, retriever))
+    g.add_node("collect", make_collect())
     g.add_node("writer", make_writer(model))
     g.add_node("verifier", make_verifier(threshold))
+    g.add_node("human_gate", make_human_gate(enable_review))
     g.add_node("critic", make_critic(model))
+
+    def fan_out(state: AgentState):
+        """把每个子问题变成一个独立的 Send 任务（数量运行期才确定）。"""
+        return [Send("researcher", {"sub_question": sq}) for sq in state["sub_questions"]]
+
     g.add_edge(START, "planner")
-    g.add_edge("planner", "researcher")
-    g.add_edge("researcher", "writer")
+    g.add_conditional_edges("planner", fan_out, ["researcher"])
+    g.add_edge("researcher", "collect")
+    g.add_edge("collect", "writer")
     g.add_edge("writer", "verifier")
-    g.add_edge("verifier", "critic")
+    g.add_edge("verifier", "human_gate")
+    g.add_edge("human_gate", "critic")
 
     def route_after_critic(state: AgentState) -> str:
         ok = (
             state.get("verdict_passed")
             and state.get("citation_coverage", 1.0) >= threshold
             and not state.get("invalid_citations")
+            and state.get("human_approved", True) is not False
         )
         if ok or state.get("revisions", 0) > max_revisions:
             return END
@@ -83,13 +97,19 @@ def _stub_planner(state: AgentState) -> dict:
 
 def _stub_researcher(state: AgentState) -> dict:
     return {
-        "notes": [f"note about: {sq}" for sq in state["sub_questions"]],
-        "sources": [{"n": 1, "source": "stub.md", "text": "stub 资料"}],
+        "findings": [
+            {
+                "sub_question": sq,
+                "text": f"note about: {sq}",
+                "sources": [{"n": 1, "id": "stub", "source": "stub.md", "text": "stub 资料"}],
+            }
+            for sq in state["sub_questions"]
+        ]
     }
 
 
 def _stub_writer(state: AgentState) -> dict:
-    bullets = "\n".join(f"- {n} [1]" for n in state["notes"])
+    bullets = "\n".join(f"- {n}" for n in state.get("notes", []))
     report = f"# Draft report\n\nQuestion: {state['question']}\n\n{bullets}"
     if state.get("critique"):
         report += f"\n\n> Revision: addressed critique -> {state['critique']}"
@@ -115,12 +135,14 @@ def build_offline_graph(checkpointer=None):
     g = StateGraph(AgentState)
     g.add_node("planner", _stub_planner)
     g.add_node("researcher", _stub_researcher)
+    g.add_node("collect", make_collect())
     g.add_node("writer", _stub_writer)
     g.add_node("verifier", _stub_verifier)
     g.add_node("critic", _stub_critic)
     g.add_edge(START, "planner")
     g.add_edge("planner", "researcher")
-    g.add_edge("researcher", "writer")
+    g.add_edge("researcher", "collect")
+    g.add_edge("collect", "writer")
     g.add_edge("writer", "verifier")
     g.add_edge("verifier", "critic")
     g.add_conditional_edges("critic", _stub_route, {"writer": "writer", END: END})

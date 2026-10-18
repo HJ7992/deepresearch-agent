@@ -12,10 +12,12 @@ dependencies = [
     "qdrant-client>=1.19,<2",
     "fastapi>=0.115",
     "uvicorn>=0.30",
+    "langgraph-checkpoint-sqlite>=3.1,<4",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.6", "httpx>=0.27"]
+postgres = ["langgraph-checkpoint-postgres>=3.2,<4", "psycopg[binary]>=3.2"]
 
 [build-system]
 requires = ["hatchling"]

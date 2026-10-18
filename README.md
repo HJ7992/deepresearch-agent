@@ -6,12 +6,12 @@
 
 > 完整技术方案见 `../01-主项目技术方案.md`。
 
-## 当前状态：M2（检索增强 + 引用核验 + 服务化）
+## 当前状态：M3（并行扇出 + 人工审核 + 断点恢复）
 
 - [x] M0 仓库骨架、CI、docker-compose、离线可运行的 StateGraph（无 LLM 依赖）
 - [x] M1 planner/researcher/writer/critic 接入真实模型（结构化输出、修订封顶、报告落盘）
 - [x] M2 文档入库 + Qdrant 检索 + verifier 引用核验 + FastAPI 服务 + token/时延计量
-- [ ] M3 mem0 记忆 + checkpoint/HITL + Send 并行
+- [x] M3 Send 并行扇出 + collect 去重重编号 + HITL 人工审核 + SQLite/Postgres 断点恢复
 - [ ] M4 Langfuse 观测 + ragas 评测 + 消融实验
 - [ ] M5 MCP Server + 演示录屏
 
@@ -72,6 +72,23 @@ Docker（需本机安装 Docker Desktop，本机尚未验证）：
 docker compose up --build
 # app(8000) + qdrant(6333)；服务端模式下自动使用 QDRANT_URL
 ```
+
+## 人工审核与断点恢复（M3 起）
+
+```bash
+# 开启 HITL：跑到人工审核门会暂停，终端里批准或退回
+.venv/Scripts/python -m deepresearch.main --review "RAG 和微调应该怎么选？"
+
+# 进程退出/被杀之后，用同一个 thread_id 恢复（状态在 data/checkpoints.sqlite）
+.venv/Scripts/python -m deepresearch.main --resume <thread_id>
+
+# 想用 Postgres 存 checkpoint：装 extra 并配 DATABASE_URL
+uv sync --extra postgres
+# DATABASE_URL=postgresql://user:pass@localhost:5432/deepresearch
+```
+
+人工退回时，意见会写进 `critique` 并打回 writer 重写，然后再次等待审核；
+即使人工批准，critic 判定不达标仍会触发修订——两道门槛相互独立。
 
 ## 常见问题
 
