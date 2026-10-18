@@ -1,5 +1,18 @@
 # M2 起使用：qdrant（向量检索）+ postgres（LangGraph checkpoint 持久化）
 services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
+      - DEEPRESEARCH_MODEL=${DEEPRESEARCH_MODEL:-gpt-4o-mini}
+      - DEEPRESEARCH_STRUCTURED_MODE=${DEEPRESEARCH_STRUCTURED_MODE:-function_calling}
+      - QDRANT_URL=http://qdrant:6333
+    depends_on:
+      - qdrant
+
   qdrant:
     image: qdrant/qdrant:latest
     ports:

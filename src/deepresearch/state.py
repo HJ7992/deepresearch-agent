@@ -16,8 +16,12 @@ class AgentState(TypedDict, total=False):
     question: str                # 输入：调研问题
     sub_questions: list[str]     # planner 产出：子问题列表
     notes: Annotated[list[str], operator.add]  # researcher 产出（只增不减）
+    sources: list[dict]          # researcher 产出：{"n", "source", "text"} 编号资料
     critique: str                # critic 产出：批评意见
     verdict_passed: bool         # critic 判定：报告是否通过
     revisions: int               # critic 已审查次数（修订循环封顶依据）
     revised: bool                # writer 是否已根据批评修订过
     report: str                  # writer 产出：最终报告
+    citation_coverage: float     # verifier：有有效引用的结论段落占比
+    invalid_citations: list[int]  # verifier：报告里不存在的引用编号（编造）
+    unsourced: list[str]         # verifier：无引用结论的摘要（最多 10 条）

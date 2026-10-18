@@ -11,5 +11,6 @@ build/
 htmlcov/
 .env
 reports/
+.qdrant/
 .idea/
 .vscode/

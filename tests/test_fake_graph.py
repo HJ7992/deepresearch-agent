@@ -7,6 +7,7 @@ from langchain_core.messages import AIMessage
 from deepresearch.config import Settings
 from deepresearch.graph import build_graph
 from deepresearch.llm import make_default_model
+from deepresearch.retriever import RetrievedChunk
 
 
 class FakeStructured:
@@ -39,6 +40,21 @@ class FakeLLM:
         return FakeStructured(schema, self.structured, self)
 
 
+class FakeRetriever:
+    """检索桩：固定返回两条资料，researcher 会按编号引用它们。"""
+
+    def __init__(self, chunks=None):
+        self.chunks = chunks or [
+            RetrievedChunk(id="rag.md#0", text="RAG 是检索增强生成。", source="rag.md"),
+            RetrievedChunk(id="ft.md#0", text="微调会改变模型参数。", source="ft.md"),
+        ]
+        self.queries: list[str] = []
+
+    def search(self, query, k=None):
+        self.queries.append(query)
+        return self.chunks
+
+
 def _critic_fail_once_llm():
     """剧本：critic 第一轮否决、第二轮通过——正好走一次完整修订。"""
     return FakeLLM(
@@ -59,7 +75,7 @@ def _critic_fail_once_llm():
 def test_full_loop_passes_after_one_revision():
     """critic 否决一次后修订通过：状态、调用次数全部符合预期。"""
     llm = _critic_fail_once_llm()
-    app = build_graph(llm)
+    app = build_graph(llm, retriever=FakeRetriever())
     out = app.invoke({"question": "什么是 RAG？"})
 
     assert out["sub_questions"] == ["Q1", "Q2"]
@@ -85,7 +101,7 @@ def test_revision_loop_is_capped():
             {"passed": False, "critique": "还是不行"},
         ],
     )
-    app = build_graph(llm, max_revisions=1)
+    app = build_graph(llm, retriever=FakeRetriever(), max_revisions=1)
     out = app.invoke({"question": "什么是 RAG？"})
 
     assert out["verdict_passed"] is False
@@ -103,7 +119,7 @@ def test_no_revision_needed_when_critic_passes():
             {"passed": True, "critique": ""},
         ],
     )
-    app = build_graph(llm)
+    app = build_graph(llm, retriever=FakeRetriever())
     out = app.invoke({"question": "什么是 RAG？"})
 
     assert out["report"] == "# 好报告"
@@ -140,12 +156,58 @@ def test_falls_back_to_json_mode_when_tool_choice_unsupported():
         replies=["n1", "n2", "# 报告"],
         structured=[{"sub_questions": ["Q1", "Q2"]}, {"passed": True, "critique": ""}],
     )
-    app = build_graph(llm)
+    app = build_graph(llm, retriever=FakeRetriever())
     out = app.invoke({"question": "什么是 RAG？"})
 
     assert out["report"] == "# 报告"
     assert out["verdict_passed"] is True
     assert llm.last_method == "json_mode"
+
+
+def test_uncited_report_triggers_revision():
+    """verifier 发现覆盖率不足时，即使 critic 通过也要打回重写。"""
+    llm = FakeLLM(
+        replies=[
+            "n1", "n2",
+            # 第 1 稿：一段没有任何引用的长结论
+            "这是一个没有任何引用标记的长结论段落，用来触发覆盖率不足的打回。",
+            # 修订稿：带引用
+            "修订后的结论引用了资料 [1]，覆盖率达标。",
+        ],
+        structured=[
+            {"sub_questions": ["Q1", "Q2"]},
+            {"passed": True, "critique": ""},   # critic 通过，但覆盖率 0
+            {"passed": True, "critique": ""},   # 修订后再次通过
+        ],
+    )
+    app = build_graph(llm, retriever=FakeRetriever())
+    out = app.invoke({"question": "什么是 RAG？"})
+
+    assert out["revisions"] == 2            # 走了两轮
+    assert out["citation_coverage"] == 1.0
+    assert llm.chat_calls == 4              # 2 调研 + 2 撰写
+
+
+def test_fabricated_citation_forces_revision():
+    """引用了不存在的编号（编造来源）时，必须打回；达到轮数上限后 stops。"""
+    llm = FakeLLM(
+        replies=[
+            "n1", "n2",
+            "这段结论引用了不存在的编号 [9]，属于编造引用，长度足够被统计。",
+            "修订稿仍然错误地引用 [9]，用来验证封顶后停止。",
+        ],
+        structured=[
+            {"sub_questions": ["Q1", "Q2"]},
+            {"passed": True, "critique": ""},
+            {"passed": True, "critique": ""},
+        ],
+    )
+    app = build_graph(llm, retriever=FakeRetriever(), max_revisions=1)
+    out = app.invoke({"question": "什么是 RAG？"})
+
+    assert out["invalid_citations"] == [9]
+    assert out["revisions"] == 2            # 修订一轮后达到上限
+    assert llm.chat_calls == 4
 
 
 class PromptOnlyLLM:
@@ -175,6 +237,6 @@ def test_non_compat_error_is_not_swallowed():
         def with_structured_output(self, schema, **kwargs):
             raise RuntimeError("Error code: 401 - invalid api key")
 
-    app = build_graph(AuthFailLLM())
+    app = build_graph(AuthFailLLM(), retriever=FakeRetriever())
     with pytest.raises(RuntimeError, match="401"):
         app.invoke({"question": "x"})
