@@ -6,14 +6,14 @@
 
 > 完整技术方案见 `../01-主项目技术方案.md`。
 
-## 当前状态：M3（并行扇出 + 人工审核 + 断点恢复）
+## 当前状态：M5（MCP 接入 + 交付收尾）
 
 - [x] M0 仓库骨架、CI、docker-compose、离线可运行的 StateGraph（无 LLM 依赖）
 - [x] M1 planner/researcher/writer/critic 接入真实模型（结构化输出、修订封顶、报告落盘）
 - [x] M2 文档入库 + Qdrant 检索 + verifier 引用核验 + FastAPI 服务 + token/时延计量
 - [x] M3 Send 并行扇出 + collect 去重重编号 + HITL 人工审核 + SQLite/Postgres 断点恢复
-- [ ] M4 Langfuse 观测 + ragas 评测 + 消融实验
-- [ ] M5 MCP Server + 演示录屏
+- [x] M4 20 题评测集 + 规则判定 + 两组消融 + 可复现评测脚本 + Langfuse 可选接入
+- [x] M5 MCP Server（stdio/HTTP）+ 演示脚本 + 指标进 README
 
 ## 快速开始
 
@@ -89,6 +89,29 @@ uv sync --extra postgres
 
 人工退回时，意见会写进 `critique` 并打回 writer 重写，然后再次等待审核；
 即使人工批准，critic 判定不达标仍会触发修订——两道门槛相互独立。
+
+## 作为 MCP Server 接入 Claude / Cursor（M5 起）
+
+```bash
+.venv/Scripts/python -m deepresearch.mcp_server          # stdio（桌面客户端默认）
+.venv/Scripts/python -m deepresearch.mcp_server --http   # HTTP 传输，127.0.0.1:8001
+```
+
+客户端配置示例（Claude Desktop，路径换成你自己的）：
+
+```json
+{
+  "mcpServers": {
+    "deepresearch": {
+      "command": "D:/zZZ/MyFiles/hermes-file/ai-agent-portfolio/deepresearch-agent/.venv/Scripts/python.exe",
+      "args": ["-m", "deepresearch.mcp_server"]
+    }
+  }
+}
+```
+
+暴露的工具：`index_status`（索引状态）、`search_docs`（毫秒级检索）、
+`research`（几十秒的完整调研，返回报告与质量指标）。
 
 ## 常见问题
 

@@ -14,24 +14,32 @@ from .checkpointer import make_checkpointer
 from .config import settings
 from .graph import build_graph
 from .llm import make_default_model
+from .observability import make_callbacks
 from .retriever import get_store
 from .state import AgentState
 from .usage import UsageTracker
 
 
-def build_app(review: bool = False, max_revisions: int = 1):
-    """构建可持久化的图。每次调用都新建 app，但共享同一个 checkpointer。"""
+def build_app(review: bool = False, max_revisions: int = 1, mode: str = "full"):
+    """构建可持久化的图。
+
+    mode：full=完整流水线；no_retrieval=关检索（消融）；
+    no_verify=关引用强制（消融）。
+    """
+    retriever = None if mode == "no_retrieval" else get_store()
     return build_graph(
         make_default_model(),
-        retriever=get_store(),
+        retriever=retriever,
         checkpointer=make_checkpointer(),
         max_revisions=max_revisions,
         enable_review=review,
+        enforce_citations=(mode != "no_verify"),
     )
 
 
 def _config(thread_id: str, tracker: UsageTracker) -> dict:
-    return {"configurable": {"thread_id": thread_id}, "callbacks": [tracker]}
+    callbacks = [tracker, *make_callbacks()]
+    return {"configurable": {"thread_id": thread_id}, "callbacks": callbacks}
 
 
 def _finish(result: dict, tracker: UsageTracker) -> AgentState:
@@ -49,10 +57,11 @@ def run(
     thread_id: str = "m3",
     max_revisions: int = 1,
     review: bool = False,
+    mode: str = "full",
 ) -> AgentState:
     """启动一次调研。review=True 时会在 human_gate 暂停，等待 resume。"""
     tracker = UsageTracker()
-    app = build_app(review=review, max_revisions=max_revisions)
+    app = build_app(review=review, max_revisions=max_revisions, mode=mode)
     result = app.invoke({"question": question}, _config(thread_id, tracker))
     return _finish(result, tracker)
 

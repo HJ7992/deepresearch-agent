@@ -42,8 +42,10 @@ def build_graph(
     max_revisions: int = 1,
     min_citation_coverage: float | None = None,
     enable_review: bool = False,
+    enforce_citations: bool = True,
 ):
-    """真实流水线。retriever 为空时 researcher 会如实说明「没有资料」。"""
+    """真实流水线。retriever 为空时 researcher 会如实说明「没有资料」。
+    enforce_citations=False 仅用于消融实验：跳过覆盖率/编造引用的硬门槛。"""
     threshold = (
         settings.citation_min_coverage
         if min_citation_coverage is None
@@ -72,12 +74,17 @@ def build_graph(
     g.add_edge("human_gate", "critic")
 
     def route_after_critic(state: AgentState) -> str:
+        # human_approved 为 False 时（人工退回）无论 critic 怎么判都要重写
         ok = (
             state.get("verdict_passed")
-            and state.get("citation_coverage", 1.0) >= threshold
-            and not state.get("invalid_citations")
             and state.get("human_approved", True) is not False
         )
+        if enforce_citations:
+            ok = (
+                ok
+                and state.get("citation_coverage", 1.0) >= threshold
+                and not state.get("invalid_citations")
+            )
         if ok or state.get("revisions", 0) > max_revisions:
             return END
         return "writer"
