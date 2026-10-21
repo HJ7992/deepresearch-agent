@@ -15,8 +15,6 @@
 每跑完一题就追加写一行 JSONL，进程中断也不会丢已完成的结果。
 """
 
-from __future__ import annotations
-
 import argparse
 import datetime as dt
 import json

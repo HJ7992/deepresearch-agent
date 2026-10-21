@@ -1,4 +1,4 @@
-# M2 起使用：qdrant（向量检索）+ postgres（LangGraph checkpoint 持久化）
+# 可选：用 docker compose 一键起 qdrant（向量检索）+ postgres（checkpoint 持久化）
 services:
   app:
     build: .

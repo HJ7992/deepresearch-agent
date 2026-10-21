@@ -1,22 +1,19 @@
-"""图构建器。
+"""把各个节点拼成一张 LangGraph 图——整个项目的骨架。
 
-M3 流水线：
-  planner ──Send 扇出──► researcher × N（并行，只答一个子问题）
-        ──► collect（去重 + 全局重编号）──► writer
-        ──► verifier（程序化核验）──► human_gate（HITL，可暂停）
-        ──► critic ──不达标/被退回──► writer（修订轮数封顶）
+谁在用：runner.build_app() 用它构建真正可运行的图；tests/test_graph.py 只看它的拓扑。
 
-设计要点（面试话术）：
-- Send 是动态扇出：子问题数量在运行时才知道，不能用静态边；
-- 路由条件同时看 critic 结论、引用覆盖率、无效引用、人工审核结果；
-- max_revisions 计「修订轮数」：writer 最多跑 1 + max 次，防止无限烧钱。
+流水线长这样：
+    planner ──Send 扇出──► researcher × N（并行，各答一个子问题）
+            ──► collect（去重 + 全局重编号）──► writer
+            ──► verifier（程序化核验）──► human_gate（人工审核，可暂停）
+            ──► critic ──不达标 / 被人工退回──► writer（修订轮数封顶）
+
+三个要点：
+- Send 是动态扇出：子问题有几个运行期才知道，静态边表达不了；
+- 放行条件同时看 critic 结论、引用覆盖率、编造引用、人工审核结果；
+- max_revisions 数的是「修订轮数」：writer 最多跑 1 + max_revisions 次，防止无限烧钱。
 """
 
-from __future__ import annotations
-
-import logging
-
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
 
@@ -32,8 +29,6 @@ from .nodes import (
 )
 from .state import AgentState
 
-logger = logging.getLogger(__name__)
-
 
 def build_graph(
     model,
@@ -44,8 +39,18 @@ def build_graph(
     enable_review: bool = False,
     enforce_citations: bool = True,
 ):
-    """真实流水线。retriever 为空时 researcher 会如实说明「没有资料」。
-    enforce_citations=False 仅用于消融实验：跳过覆盖率/编造引用的硬门槛。"""
+    """组装并编译图。
+
+    参数含义：
+    - model：聊天模型（只要能被节点 invoke）。测试里传剧本假模型；
+    - retriever：有 search(query) 方法就行；传 None 时 researcher 会如实说「没有资料」；
+    - checkpointer：状态存储，配合 thread_id 才能暂停/续跑；
+    - max_revisions：critic 否决后允许的修订轮数；
+    - min_citation_coverage：引用覆盖率门槛，None 表示读配置；
+    - enable_review：是否插入人工审核（CI 里关掉，避免卡住）；
+    - enforce_citations：False 仅用于消融实验，跳过覆盖率/编造引用的硬门槛。
+    """
+    # 门槛只在建图时算一次，路由函数里直接闭包引用
     threshold = (
         settings.citation_min_coverage
         if min_citation_coverage is None
@@ -53,6 +58,8 @@ def build_graph(
     )
 
     g = StateGraph(AgentState)
+
+    # 每个节点工厂都返回一个 (state) -> dict 的函数，依赖在工厂里注入
     g.add_node("planner", make_planner(model))
     g.add_node("researcher", make_researcher(model, retriever))
     g.add_node("collect", make_collect())
@@ -62,29 +69,33 @@ def build_graph(
     g.add_node("critic", make_critic(model))
 
     def fan_out(state: AgentState):
-        """把每个子问题变成一个独立的 Send 任务（数量运行期才确定）。"""
+        """把每个子问题变成一个独立的 Send 任务：几个子问题就几个并行 researcher。"""
         return [Send("researcher", {"sub_question": sq}) for sq in state["sub_questions"]]
 
+    # ---- 主干边：一条直线走到底，唯一的回头路在 critic 后面 ----
     g.add_edge(START, "planner")
-    g.add_conditional_edges("planner", fan_out, ["researcher"])
-    g.add_edge("researcher", "collect")
+    g.add_conditional_edges("planner", fan_out, ["researcher"])  # 动态扇出
+    g.add_edge("researcher", "collect")   # 多个 researcher 都汇到 collect
     g.add_edge("collect", "writer")
     g.add_edge("writer", "verifier")
     g.add_edge("verifier", "human_gate")
     g.add_edge("human_gate", "critic")
 
     def route_after_critic(state: AgentState) -> str:
-        # human_approved 为 False 时（人工退回）无论 critic 怎么判都要重写
+        """最后一道岔路：交付，还是打回 writer 重写。"""
+        # 人工退回（human_approved 为 False）时，critic 说通过也不算过
         ok = (
             state.get("verdict_passed")
             and state.get("human_approved", True) is not False
         )
         if enforce_citations:
+            # 硬门槛：覆盖率达标 + 没有编造的引用编号，两个都是「有据可查」的底线
             ok = (
                 ok
                 and state.get("citation_coverage", 1.0) >= threshold
                 and not state.get("invalid_citations")
             )
+        # 已经修满 max_revisions 轮就硬停，即使还不满意也把最新一稿交出去
         if ok or state.get("revisions", 0) > max_revisions:
             return END
         return "writer"
@@ -93,78 +104,17 @@ def build_graph(
     return g.compile(checkpointer=checkpointer)
 
 
-# ---------------------------------------------------------------------------
-# 离线桩节点（无 LLM、无检索器）——演示 + 拓扑冒烟测试
-# ---------------------------------------------------------------------------
+def main() -> str:
+    """打印这张图的结构（Mermaid 文本）：python -m deepresearch.graph。
 
-def _stub_planner(state: AgentState) -> dict:
-    q = state["question"]
-    return {"sub_questions": [f"What is {q}?", f"Why does {q} matter?"]}
-
-
-def _stub_researcher(state: AgentState) -> dict:
-    return {
-        "findings": [
-            {
-                "sub_question": sq,
-                "text": f"note about: {sq}",
-                "sources": [{"n": 1, "id": "stub", "source": "stub.md", "text": "stub 资料"}],
-            }
-            for sq in state["sub_questions"]
-        ]
-    }
-
-
-def _stub_writer(state: AgentState) -> dict:
-    bullets = "\n".join(f"- {n}" for n in state.get("notes", []))
-    report = f"# Draft report\n\nQuestion: {state['question']}\n\n{bullets}"
-    if state.get("critique"):
-        report += f"\n\n> Revision: addressed critique -> {state['critique']}"
-        return {"report": report, "revised": True}
-    return {"report": report}
-
-
-def _stub_verifier(state: AgentState) -> dict:
-    return {"citation_coverage": 1.0, "invalid_citations": [], "unsourced": []}
-
-
-def _stub_critic(state: AgentState) -> dict:
-    if state.get("revised"):
-        return {}
-    return {"critique": "cite a source for every claim", "revised": False}
-
-
-def _stub_route(state: AgentState) -> str:
-    return END if state.get("revised") else "writer"
-
-
-def build_offline_graph(checkpointer=None):
-    g = StateGraph(AgentState)
-    g.add_node("planner", _stub_planner)
-    g.add_node("researcher", _stub_researcher)
-    g.add_node("collect", make_collect())
-    g.add_node("writer", _stub_writer)
-    g.add_node("verifier", _stub_verifier)
-    g.add_node("critic", _stub_critic)
-    g.add_edge(START, "planner")
-    g.add_edge("planner", "researcher")
-    g.add_edge("researcher", "collect")
-    g.add_edge("collect", "writer")
-    g.add_edge("writer", "verifier")
-    g.add_edge("verifier", "critic")
-    g.add_conditional_edges("critic", _stub_route, {"writer": "writer", END: END})
-    return g.compile(checkpointer=checkpointer)
-
-
-def main(question: str = "What is retrieval-augmented generation?") -> dict:
-    """离线演示：python -m deepresearch.graph，不需要任何 API key。"""
-    app = build_offline_graph(checkpointer=InMemorySaver())
-    config = {"configurable": {"thread_id": "demo"}}
-    result = app.invoke({"question": question}, config=config)
-    print(result["report"])
-    return result
+    不需要 API key，也不会调用模型：节点工厂只是把参数包成函数，画图时并不执行它们。
+    """
+    # model 传 None 就够：这里只关心节点和边怎么连，没有任何节点会被 invoke
+    app = build_graph(None)
+    mermaid = app.get_graph().draw_mermaid()
+    print(mermaid)
+    return mermaid
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
     main()

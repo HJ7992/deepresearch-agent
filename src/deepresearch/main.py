@@ -1,14 +1,12 @@
-"""命令行入口。
+"""命令行入口：在终端里跑一次调研，报告存进 reports/。
 
 用法：
   python -m deepresearch.main "你的调研问题"            # 直接跑（无人工审核）
   python -m deepresearch.main --review "你的调研问题"   # 开启 HITL，人工批准/退回
   python -m deepresearch.main --resume <thread_id>      # 进程重启后恢复暂停的调研
 
-报告存 reports/*.md，计量信息存同名 *.json。
+报告存 reports/*.md，计量信息存同名 *.json（token、耗时、成本估算、覆盖率）。
 """
-
-from __future__ import annotations
 
 import argparse
 import datetime as dt
@@ -28,11 +26,12 @@ def _slugify(text: str, max_len: int = 40) -> str:
 
 
 def _ask_decision(result: dict) -> dict:
-    """人工审核交互：批准或退回（可附意见）。"""
+    """人工审核交互：批准或退回（退回可以附一条意见）。"""
     print("\n" + "=" * 64)
     print("【人工审核】引用覆盖率：", result.get("citation_coverage"))
     invalid = result.get("invalid_citations") or []
     if invalid:
+        # 编造引用是硬伤，先提醒再让人决定
         print("【警告】报告引用了不存在的编号：", invalid)
     while True:
         answer = input("批准这份报告？[y=批准 / n=退回] ").strip().lower()
@@ -45,10 +44,13 @@ def _ask_decision(result: dict) -> dict:
 
 
 def _save(result: dict, question: str) -> None:
+    """把报告和计量信息各存一份到 reports/。"""
     out_dir = pathlib.Path("reports")
     out_dir.mkdir(exist_ok=True)
     stem = f"{dt.datetime.now():%Y%m%d-%H%M%S}-{_slugify(question or 'resume')}"
     (out_dir / f"{stem}.md").write_text(result.get("report", ""), encoding="utf-8")
+
+    # json 与 md 同名：看一眼报告，再对照它的成本和质量指标
     payload = {
         "question": question,
         "metrics": result.get("metrics", {}),
@@ -88,7 +90,7 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
-    # 恢复模式：先打印已有报告，再让人工做决定
+    # 恢复模式：先把已有的报告打出来，再让人工做决定
     if args.resume:
         snapshot = get_state(args.resume)
         if not snapshot.values:
@@ -110,14 +112,14 @@ def main() -> None:
         )
         question = args.question
 
-    # 可能多次暂停（退回后再次进入人工审核）
+    # 可能暂停多次（人工退回重写后又会回到审核门），所以用循环而不是 if
     while result.get("paused"):
         print(result.get("report", ""))
         result = resume(thread_id, _ask_decision(result), args.max_revisions)
 
     print(result.get("report", ""))
     _save(result, question)
-    # 本地嵌入式向量库在进程退出前显式关闭，避免 __del__ 告警
+    # 本地嵌入式向量库要显式关闭，否则退出时 Qdrant 会打 __del__ 告警
     try:
         get_store().close()
     except Exception as exc:  # noqa: BLE001 — 关闭失败不影响结果

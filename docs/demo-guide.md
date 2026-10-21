@@ -1,13 +1,14 @@
 # 3 分钟演示录屏脚本
 
-> 目的：面试官/HR 点开仓库 30 秒能看懂，3 分钟能看完整个系统。
+> 目的：对方点开仓库 30 秒能看懂，3 分钟能看完整个系统。
 > 工具：OBS Studio 或 Windows 自带 Xbox Game Bar（Win+G）；终端字号调到 16–18。
 
 ## 录制前准备
 
 ```bash
-.venv/Scripts/python -m deepresearch.ingest data/docs   # 确保索引就绪
-.venv/Scripts/python -m deepresearch.main "RAG 和微调应该怎么选？"  # 提前跑一遍，确认有报告
+.venv/Scripts/python -m deepresearch.ingest data/docs                  # 确保索引就绪
+.venv/Scripts/python -m deepresearch.graph                             # 先跑一次，确认拓扑能打印
+.venv/Scripts/python -m deepresearch.main "RAG 和微调应该怎么选？"       # 提前跑一遍，确认有报告
 ```
 
 - 打开三个窗口：① 终端（项目目录）② 浏览器（GitHub 仓库页）③ 生成的报告文件
@@ -21,9 +22,10 @@
   报告要有据可查，以及长任务要可控。」
 
 **0:15–0:45 架构 30 秒**
-- 切到 README 架构图，指着讲：
+- 切到 README 架构图（或终端里 `python -m deepresearch.graph` 的输出，粘到 mermaid.live），指着讲：
   planner 拆子问题 → Send 并行检索 → collect 去重重编号 → writer 写报告 →
   verifier 程序化核验 → critic 审查 → 人工审核门
+- 顺带一句：「这张图不是手画的，是程序从真实图对象里打印出来的。」
 
 **0:45–1:45 跑一次真实调研**
 - 浏览器打开 http://127.0.0.1:8000（先 `uvicorn deepresearch.api:app --port 8000`）

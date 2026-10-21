@@ -1,9 +1,12 @@
-"""MCP Server：把调研能力暴露给任何 MCP 客户端（Claude Desktop / Cursor）。
+"""MCP Server：把调研能力暴露给任何 MCP 客户端（Claude Desktop / Cursor 等）。
 
-工具：
-- index_status：查看当前索引片段数（毫秒级）
-- search_docs：只检索本地文档，返回片段与来源（毫秒级）
-- research：跑完整多 Agent 流水线，返回报告 + 引用覆盖率 + 计量（几十秒）
+暴露三个工具，按耗时分工：
+- index_status：看当前索引有多少片段（毫秒级）；
+- search_docs：只检索本地文档，返回片段和来源（毫秒级）；
+- research：跑完整多 Agent 流水线，返回报告 + 覆盖率 + 计量（几十秒）。
+
+为什么要分这么细：MCP 客户端有超时约束。只想查资料时走 search_docs（快、便宜），
+需要成稿才用 research（慢、贵）。让模型自己按需要选。
 
 运行：
   python -m deepresearch.mcp_server            # stdio（桌面客户端默认）
@@ -14,8 +17,6 @@ command 指向本项目的 .venv/Scripts/python（或 bin/python），args 为
 "-m", "deepresearch.mcp_server"。
 """
 
-from __future__ import annotations
-
 import argparse
 import logging
 import uuid
@@ -24,8 +25,6 @@ from fastmcp import FastMCP
 
 from .retriever import get_store
 from .runner import run
-
-logger = logging.getLogger(__name__)
 
 mcp = FastMCP("DeepResearch")
 
@@ -39,6 +38,7 @@ def index_status() -> dict:
 @mcp.tool
 def search_docs(query: str, top_k: int = 4) -> list[dict]:
     """检索本地文档库，返回最相关的片段与来源文件名（不生成报告，速度快）。"""
+    # 把条数限制在 1..12：太少没信息量，太多会撑爆客户端上下文
     chunks = get_store().search(query, k=max(1, min(top_k, 12)))
     return [
         {"source": c.source, "score": round(c.score, 3), "text": c.text}
@@ -52,6 +52,7 @@ def research(question: str) -> dict:
 
     耗时通常 30-90 秒，调用方需允许较长超时。
     """
+    # 每次调用一个新 thread_id：不同问题的状态互不干扰
     result = run(question, thread_id=f"mcp-{uuid.uuid4().hex[:8]}", review=False)
     return {
         "report": result.get("report", ""),

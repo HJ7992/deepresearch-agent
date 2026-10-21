@@ -1,22 +1,28 @@
-"""文本切块：按段落打包，超长段落滑窗切分。
+"""文本切块：先按空行分段，再把小段打包，超长段落用滑窗兜底切。
 
-设计要点（面试话术）：切块是 RAG 质量的第一道闸——切太碎丢上下文，
-切太大检索不精准、还浪费 token。这里走「空行分段 → 段落打包到上限 →
-超长段落滑窗兜底」，中文按字符窗口切，窗口间保留重叠避免语义断裂。
+谁在用：ingest.py 入库前调用 chunk_text()；切出来的每块会变成一条检索资料。
+
+为什么切块要认真做：它是 RAG 质量的第一道闸。
+- 切太碎：每块丢上下文，检索回来的片段看不懂；
+- 切太大：向量混了太多主题，检索不准，还白烧 token。
+
+这里的三步策略：
+1) 按空行分段（尊重作者本来的结构）；
+2) 段落按顺序打包到不超过上限（整段装，不切断句子）；
+3) 单段就超长时，按字符窗口切、窗口之间保留重叠，避免语义被切断在边界。
 """
-
-from __future__ import annotations
 
 import re
 
-DEFAULT_MAX_CHARS = 600
-DEFAULT_OVERLAP = 80
+DEFAULT_MAX_CHARS = 600   # 单块上限（字符数）
+DEFAULT_OVERLAP = 80      # 滑窗切分时相邻窗口的重叠字符数
 
 
 def _split_long(text: str, max_chars: int, overlap: int) -> list[str]:
     """超长段落按字符窗口切，相邻窗口保留 overlap 个字符的重叠。"""
     if len(text) <= max_chars:
         return [text]
+    # step 至少要 1，否则 overlap >= max_chars 时会原地死循环
     step = max(1, max_chars - overlap)
     return [text[i : i + max_chars] for i in range(0, len(text), step)]
 
@@ -31,16 +37,19 @@ def chunk_text(
     if not text:
         return []
 
+    # 1) 分段：连续空行（含带空格的空行）都算段落分隔
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+
+    # 2) 超长段落先拆成能装下的片段
     pieces: list[str] = []
     for p in paragraphs:
         pieces.extend(_split_long(p, max_chars, overlap))
 
-    # 把小块按顺序打包到不超过上限；打包是「整块装」，不切句子
+    # 3) 按顺序打包到上限，装不下就收一块重新开始
     chunks: list[str] = []
     buf = ""
     for piece in pieces:
-        if buf and len(buf) + len(piece) + 1 > max_chars:
+        if buf and len(buf) + len(piece) + 1 > max_chars:  # +1 是拼接时的换行
             chunks.append(buf)
             buf = piece
         else:

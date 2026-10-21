@@ -264,7 +264,7 @@ def test_non_compat_error_is_not_swallowed():
 
 
 # ---------------------------------------------------------------------------
-# M3：Send 并行扇出、collect 重编号、HITL、跨实例 checkpoint 恢复
+# 并行扇出、collect 重编号、HITL 暂停/恢复、跨实例 checkpoint 恢复
 # ---------------------------------------------------------------------------
 
 def _responder_by_subquestion(messages):
