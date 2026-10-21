@@ -1,0 +1,15 @@
+# Streamlit 主题：只放「框架级」的颜色与字体，细节样式都在 ui_theme.py 的 CSS 里。
+[theme]
+base = "light"
+primaryColor = "#2C4A78"
+backgroundColor = "#FAFAF7"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#16202C"
+
+[browser]
+# 关掉匿名使用统计上报，本地跑不往外发请求
+gatherUsageStats = false
+
+[server]
+# 允许局域网同事直接看（打开浏览器即可访问），需要隐藏时改成 false
+headless = false

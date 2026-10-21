@@ -30,7 +30,7 @@ Demo 级的「自动写报告」已经很常见，真正拿去用会卡在三件
 - **检索**：文档切块 → 嵌入 → Qdrant（默认本地嵌入式，可切服务端）→ 相似度检索
 - **质量**：引用覆盖率、编造引用检测、修订轮数上限、人工退回
 - **持久化**：SQLite（默认）或 Postgres 存 checkpoint，支持暂停 / 恢复 / 跨进程续跑
-- **接口**：CLI、HTTP 服务 + 单页网页、MCP Server（stdio / HTTP）
+- **接口**：Streamlit 工作台、FastAPI 服务（提交 + 轮询）、CLI、MCP Server（stdio / HTTP）
 - **计量**：每次调研的 token、耗时、成本估算随报告落盘；可选 Langfuse 追踪
 - **评测**：20 题固定评测集 + 规则判定 + 两组消融，脚本可复现
 
@@ -42,7 +42,7 @@ uv venv --python 3.12
 uv sync --extra dev
 
 # 跑测试（全部离线，无需 API key：剧本假模型 + 本地嵌入式向量库）
-.venv/Scripts/python -m pytest -q        # Windows；44 个用例
+.venv/Scripts/python -m pytest -q        # Windows；58 个用例
 # .venv/bin/python -m pytest -q          # macOS/Linux
 
 # 文档入库（切块 + 嵌入 + 写入 Qdrant，默认本地嵌入式模式）
@@ -50,6 +50,9 @@ uv sync --extra dev
 
 # 看流水线的结构图（打印 Mermaid 文本，不需要 API key、不调用模型）
 .venv/Scripts/python -m deepresearch.graph
+
+# 打开 Streamlit 工作台（浏览器 http://localhost:8501，Ctrl+C 停止）
+.venv/Scripts/python -m streamlit run src/deepresearch/streamlit_app.py
 
 # Lint
 .venv/Scripts/python -m ruff check .
@@ -98,19 +101,34 @@ docker compose up --build
 # app(8000) + qdrant(6333)，服务端模式下自动使用 QDRANT_URL
 ```
 
-## 网页界面
+## 网页界面（Streamlit）
 
 ```bash
-.venv/Scripts/python -m uvicorn deepresearch.api:app --port 8000
-# 浏览器打开 http://127.0.0.1:8000
+.venv/Scripts/python -m streamlit run src/deepresearch/streamlit_app.py
+# 浏览器打开 http://localhost:8501
 ```
 
-单页原生 HTML/JS（无构建链，Markdown 渲染库本地内置）：
+一个页面走完「提问 → 看它推进 → 审阅报告 → 批准/退回」：
 
-- 输入问题 → 提交 → 轮询进度 → 渲染 Markdown 报告与引用来源
-- 展示引用覆盖率、tokens、耗时、审查轮次、编造引用（如有）
-- 勾选「人工审核」后，报告生成即暂停，界面直接**批准 / 退回重写**
-- 顶部显示索引就绪状态与片段数
+- **阶段轨道**：规划 → 检索 ×N → 归并 → 撰写 → 核验 → 审核 → 审查。
+  轨道上直接标出图里的节点名（`planner`/`collect`/…），进度来自 checkpoint
+  里「哪个字段已经写进来」，不是假动画；跑完哪个节点就亮哪个。
+- **指标带**：引用覆盖率带及格刻度（低于 60% 变红）、tokens、耗时、审查轮次、
+  来源数；有编造引用时单独标出。
+- **报告 + 来源台账**：正文按阅读宽度排版，下面逐条列出 `[n]` 对应的文件名与
+  原文片段——报告里的每个编号都能查到出处。
+- **人工审核**：勾选「生成后先人工审核」，报告生成后停在审核门，可以直接
+  **批准并交付**或填意见**退回重写**，退回后重新走修订再回来复核。
+- **运行中不阻塞**：调研在后台线程跑，界面每 1.5 秒读一次 checkpoint 刷新进度；
+  侧栏保留本次会话的多次调研，可来回切换查看。
+- **可分享**：`http://localhost:8501/?thread=<thread_id>` 直接打开某次调研。
+
+样式集中在 `src/deepresearch/ui_theme.py`（配色、字体、卡片、轨道），页面逻辑在
+`src/deepresearch/streamlit_app.py`，想改长相只动前者。
+
+> 界面截图：跑一次调研后把图放到 `reports/`；仓库里不存二进制截图。
+> 另有一个更轻的原生页面随 FastAPI 一起提供（不含阶段轨道与来源台账）：
+> `.venv/Scripts/python -m uvicorn deepresearch.api:app --port 8000` → `http://127.0.0.1:8000`
 
 ## 人工审核与断点恢复
 
@@ -181,7 +199,8 @@ planner ──Send 扇出──► researcher × N（并行检索）──► co
 | `structured.py` | 结构化输出的三级降级 |
 | `chunking.py` / `embeddings.py` / `retriever.py` / `ingest.py` | 切块、向量化、Qdrant 存取、入库 CLI |
 | `checkpointer.py` / `runner.py` | 状态持久化、对外入口（run / resume / get_state） |
-| `api.py` / `web/` / `mcp_server.py` | HTTP 服务与网页、MCP 工具 |
+| `streamlit_app.py` / `ui_theme.py` | Streamlit 工作台：页面编排 + 视觉层（配色 / 字体 / 阶段轨道） |
+| `api.py` / `web/` / `mcp_server.py` | FastAPI 服务与内置轻量页面、MCP 工具 |
 | `usage.py` / `observability.py` | token 与耗时计量、可选 Langfuse 上报 |
 
 ## 评测结果（20 题评测集，规则判定）
