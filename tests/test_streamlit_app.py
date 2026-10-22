@@ -137,13 +137,60 @@ def test_review_notice_mentions_both_actions():
 def test_app_renders_without_error():
     app = AppTest.from_file(str(APP_PATH), default_timeout=60).run()
     assert not app.exception
-    # 空状态下侧栏应该有提问框和「开始调研」按钮
+    # 首页就应该有提问框和「开始调研」按钮
     assert app.text_area(key="question") is not None
-    labels = [b.label for b in app.sidebar.button]
+    assert "开始调研" in [b.label for b in app.button]
+
+
+def test_ask_form_lives_in_main_area():
+    """回归：提问入口必须在主区。曾经只放在侧栏，侧栏一折叠页面就完全没法操作。"""
+    app = AppTest.from_file(str(APP_PATH), default_timeout=60).run()
+    labels = [b.label for b in app.button]
     assert "开始调研" in labels
+    assert "开始调研" not in [b.label for b in app.sidebar.button]
+    # 示例问题也在主区，点了就能填进提问框
+    assert any(label.startswith("RAG 和微调") for label in labels)
 
 
-def test_app_has_no_sidebar_history_before_first_run():
+def test_home_lists_history():
+    """首页要能看到历史调研，点一条就能回到那次结果。"""
+    app = AppTest.from_file(str(APP_PATH), default_timeout=60).run()
+    app.session_state["runs"] = [
+        {
+            "thread_id": "t-history",
+            "question": "上次问过的问题",
+            "created": "10-21 10:00",
+            "box": {"status": "done"},
+        }
+    ]
+    app.run()
+    assert not app.exception
+    labels = [b.label for b in app.button]
+    assert any("上次问过的问题" in label for label in labels)
+    assert any("已完成" in label for label in labels)
+
+
+def test_detail_view_has_home_button():
+    """详情页左上角要有返回首页的入口。"""
+    app = AppTest.from_file(str(APP_PATH), default_timeout=60).run()
+    app.session_state["runs"] = [
+        {
+            "thread_id": "t-detail",
+            "question": "详情页问题",
+            "created": "10-21 10:00",
+            "box": {"status": "done"},
+        }
+    ]
+    app.session_state["view"] = "t-detail"
+    app.run()
+    assert not app.exception
+    labels = [b.label for b in app.button]
+    assert app.button(key="go-home") is not None
+    # 首页的「开始调研」此时不该出现（发起入口在首页）
+    assert "开始调研" not in labels
+
+
+def test_app_has_no_history_before_first_run():
     app = AppTest.from_file(str(APP_PATH), default_timeout=60).run()
     assert app.session_state["runs"] == []
-    assert app.session_state["current"] == 0
+    assert app.session_state["view"] is None

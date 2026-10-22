@@ -73,10 +73,13 @@ html, body, [data-testid="stAppViewContainer"] {{
   background: #F3F2ED;
   border-right: 1px solid var(--rule);
 }}
+/* 兜底：任何一处溢出都不该让整页横向滚动（横条会把内容顶偏） */
+html, body {{ overflow-x: hidden; }}
 .block-container {{
   max-width: 1080px;
   padding-top: 1.6rem;
   padding-bottom: 4rem;
+  overflow-x: hidden;
 }}
 h1, h2, h3, h4 {{ font-family: var(--serif); letter-spacing: 0; }}
 a {{ color: var(--indigo); }}
@@ -426,6 +429,75 @@ button[kind="primary"] {{
   border: 1px dashed var(--rule); border-radius: 10px; padding: 18px;
 }}
 
+/* ---------- 提问卡（主区，主流程入口）---------- */
+.st-key-askcard {{
+  background: var(--card);
+  border: 1px solid var(--rule);
+  border-radius: 12px;
+  padding: 20px 22px 14px;
+  margin-bottom: 22px;
+}}
+.dr-current-q {{
+  font-size: 13.5px;
+  color: var(--ink-soft);
+  padding: 8px 0 0;
+  line-height: 1.6;
+}}
+.dr-current-q strong {{ color: var(--ink); font-weight: 600; }}
+
+/* 首页底部那行说明（模型 / checkpoint） */
+.dr-footer {{
+  margin-top: 30px;
+  padding-top: 14px;
+  border-top: 1px solid var(--rule);
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-soft);
+}}
+
+/* 详情页左上角「返回首页」：纯图标按钮，不要文字挤成两行 */
+.st-key-homebtn button {{
+  min-width: 38px;
+  min-height: 36px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-soft);
+  border-color: transparent;
+  background: transparent;
+}}
+.st-key-homebtn button:hover {{
+  color: var(--indigo);
+  background: var(--indigo-soft);
+}}
+
+/* 首页历史：按钮做成整行可点的条目，长问题省略号截断 */
+.st-key-history button {{
+  justify-content: flex-start;
+  text-align: left;
+  min-height: 38px;
+  padding: 6px 12px;
+}}
+.st-key-history button p {{
+  font-size: 13.5px;
+  font-weight: 400;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}}
+
+/* 侧栏折叠后左上角那个「展开」按钮（1.66 的 testid 是 stExpandSidebarButton）
+   要看得见、点得着，否则侧栏折起来就再也找不回来 */
+[data-testid="stExpandSidebarButton"] {{ visibility: visible; }}
+[data-testid="stExpandSidebarButton"] button,
+button[data-testid="stExpandSidebarButton"] {{
+  background: var(--card);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  color: var(--indigo);
+}}
+
 /* ---------- 空状态 ---------- */
 .dr-intro {{ max-width: 60ch; margin-bottom: 6px; }}
 .dr-intro h1 {{
@@ -674,7 +746,7 @@ def intro() -> str:
     return (
         '<div class="dr-intro"><h1>把一个问题，跑成一份有出处的报告。</h1>'
         "<p>系统会拆解问题、并行检索本地文档、写成报告，然后用程序核验每条引用，"
-        "最后交给 critic 审稿。左侧输入问题即可开始；想先看稿再交付，打开人工审核。</p>"
+        "最后交给 critic 审稿。在下面的输入框里提问就能开始；想先看稿再交付，打开人工审核。</p>"
         "</div>"
         '<div class="dr-steps">'
         "<div><b>01 · 拆解</b><span>planner 把问题拆成 2–4 个能独立回答的子问题</span></div>"

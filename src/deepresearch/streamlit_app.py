@@ -1,22 +1,26 @@
-"""Streamlit 界面：一个页面走完「提问 → 看它推进 → 审阅报告 → 批准/退回」。
+"""Streamlit 界面：首页发起调研、看历史；详情页看进度、审阅报告、批准/退回。
 
 启动：streamlit run src/deepresearch/streamlit_app.py
 
-为什么用「后台线程 + fragment 轮询」而不是直接调用：
-- runner.run() 是同步阻塞几十秒的调用，直接在脚本里跑会把界面卡住，转圈转到底；
-- 所以把它丢进线程，主线程用 st.fragment(run_every=...) 每秒读一次 checkpoint
-  （runner.get_state），据此刷新阶段轨道、指标和报告。
-- 进度不是假动画：阶段是看 checkpoint 里「哪个字段已经写进来了」推断的，
-  字段与节点的对应关系见 state.py。
+两个视图（用 session_state["view"] 切换，None 表示首页）：
+- 首页：提问卡 + 示例问题 + 最近的调研。发起新调研后自动进入详情页；
+- 详情页：左上角返回图标回到首页，下面是阶段轨道、指标、报告、来源台账。
 
-为什么界面单独成一层：ui_theme.py 负责长相（颜色、字体、卡片），这里只负责
-「什么时候显示什么、按钮按下后发生什么」。
+布局原则（踩过的坑）：主流程必须在主区，不能只放在可折叠的侧栏里——否则侧栏
+一折叠，页面上就没有任何可点的东西了。所以这里干脆不用侧栏。
+
+为什么用「后台线程 + fragment 轮询」而不是直接调用：
+- runner.run() 是同步阻塞几十秒的调用，直接在脚本里跑会把界面卡住；
+- 所以把它丢进线程，主线程用 st.fragment(run_every=...) 每 1.5 秒读一次 checkpoint
+  （runner.get_state），据此刷新阶段轨道、指标和报告；
+- 进度不是假动画：阶段是看 checkpoint 里「哪个字段已经写进来了」推断的（见 state.py）。
 """
 
 import threading
 import time
 import uuid
 from datetime import datetime
+from html import escape
 
 import streamlit as st
 
@@ -36,6 +40,14 @@ EXAMPLE_QUESTIONS = (
     "怎么评估一个 Agent 系统好不好？",
     "LangGraph 里状态和图是怎么组织的？",
 )
+
+# 首页历史列表里显示的状态文案
+STATUS_TEXT = {
+    "running": "运行中",
+    "paused": "待审核",
+    "done": "已完成",
+    "failed": "失败",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +90,7 @@ def _snapshot(thread_id: str) -> tuple[dict, bool]:
 # ---------------------------------------------------------------------------
 
 def _start_run(question: str, review: bool) -> None:
-    """提交一次调研：立刻返回，界面接着轮询进度。"""
+    """提交一次调研：立刻进入详情页，界面接着轮询进度。"""
     thread_id = f"ui-{uuid.uuid4().hex[:8]}"
     box: dict = {"status": "running", "started": time.time()}
     st.session_state.runs.insert(
@@ -86,11 +98,11 @@ def _start_run(question: str, review: bool) -> None:
         {
             "thread_id": thread_id,
             "question": question,
-            "created": datetime.now().strftime("%H:%M"),
+            "created": datetime.now().strftime("%m-%d %H:%M"),
             "box": box,
         },
     )
-    st.session_state.current = 0
+    st.session_state.view = thread_id  # 提交后直接看这次调研的进度
 
     def work() -> None:
         # 线程里只操作普通 dict，不碰任何 st.* 调用
@@ -105,7 +117,7 @@ def _start_run(question: str, review: bool) -> None:
 
 def _start_resume(thread_id: str, approved: bool, comment: str) -> None:
     """提交人工审核结论：批准继续终审，退回则打回 writer 重写。"""
-    run = next((r for r in st.session_state.runs if r["thread_id"] == thread_id), None)
+    run = _find_run(thread_id)
     if run is None:
         return
     box = run["box"]
@@ -124,7 +136,131 @@ def _start_resume(thread_id: str, approved: bool, comment: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 渲染
+# 会话：找一条记录、切换视图
+# ---------------------------------------------------------------------------
+
+def _find_run(thread_id: str | None) -> dict | None:
+    if not thread_id:
+        return None
+    return next((r for r in st.session_state.runs if r["thread_id"] == thread_id), None)
+
+
+def _open_run(thread_id: str) -> None:
+    st.session_state.view = thread_id
+
+
+def _go_home() -> None:
+    st.session_state.view = None
+
+
+def _init_state() -> None:
+    st.session_state.setdefault("question", "")
+    st.session_state.setdefault("review", False)
+    st.session_state.setdefault("runs", [])
+    st.session_state.setdefault("view", None)  # None = 首页
+
+    # ?thread= 只在打开页面时生效一次：之后用户点「返回首页」，不该被它拉回详情页
+    if not st.session_state.get("_qp_done"):
+        thread = st.query_params.get("thread")
+        if thread:
+            if _find_run(thread) is None:
+                # 历史列表里显示真实问题（从 checkpoint 里读），读不到才退回会话 id
+                values, _ = _snapshot(thread)
+                st.session_state.runs.append(
+                    {
+                        "thread_id": thread,
+                        "question": values.get("question") or f"会话 {thread}",
+                        "created": "",
+                        "box": {"status": "done"},
+                    }
+                )
+            st.session_state.view = thread
+        st.session_state["_qp_done"] = True
+
+
+# ---------------------------------------------------------------------------
+# 首页：提问入口 + 历史
+# ---------------------------------------------------------------------------
+
+def _ask_form(form_key: str) -> None:
+    """提问表单：唯一的发起入口。"""
+    api_ready = bool(settings.openai_api_key)
+    with st.form(form_key, clear_on_submit=False, border=False):
+        question = st.text_area(
+            "调研问题",
+            key="question",
+            height=104,
+            placeholder="例如：RAG 和微调应该怎么选？",
+            label_visibility="collapsed",
+        )
+        left, right = st.columns([3, 2], vertical_alignment="center")
+        with left:
+            review = st.toggle("生成后先人工审核", key="review")
+        with right:
+            submitted = st.form_submit_button(
+                "开始调研",
+                type="primary",
+                use_container_width=True,
+                disabled=not api_ready,
+            )
+
+    if submitted:
+        text = (question or "").strip()
+        if len(text) < 2:
+            st.error("问题太短了，写清楚一点再提交。")
+        else:
+            _start_run(text, review)
+            st.rerun()
+
+
+def _fill_question(question: str) -> None:
+    """示例问题按钮的回调：在 widget 实例化之前改它的值，避免 Streamlit 报错。"""
+    st.session_state.question = question
+
+
+def _examples() -> None:
+    """示例问题，点一下填进上面的输入框。"""
+    st.markdown('<div class="dr-side-label">或者试试这些</div>', unsafe_allow_html=True)
+    for start in (0, 2):
+        cols = st.columns(2)
+        for offset, col in enumerate(cols):
+            index = start + offset
+            if index >= len(EXAMPLE_QUESTIONS):
+                break
+            example = EXAMPLE_QUESTIONS[index]
+            col.button(
+                example,
+                key=f"example-{index}",
+                use_container_width=True,
+                on_click=_fill_question,
+                args=(example,),
+            )
+
+
+def _history() -> None:
+    """首页的历史列表：点一条就回到那次调研。"""
+    runs = st.session_state.runs
+    if not runs:
+        return
+    st.markdown('<div class="dr-side-label">最近的调研</div>', unsafe_allow_html=True)
+    with st.container(key="history"):
+        for run in runs[:8]:
+            status = STATUS_TEXT.get(run["box"].get("status"), "")
+            when = run.get("created") or ""
+            label = f"{run['question']}\u3000·\u3000{status}"
+            if when:
+                label = f"{label}\u3000{when}"
+            st.button(
+                label,
+                key=f"hist-{run['thread_id']}",
+                use_container_width=True,
+                on_click=_open_run,
+                args=(run["thread_id"],),
+            )
+
+
+# ---------------------------------------------------------------------------
+# 详情页：轨道、指标、审核卡、报告、来源台账
 # ---------------------------------------------------------------------------
 
 def _elapsed(box: dict) -> int:
@@ -159,7 +295,7 @@ def _process_details(result: dict) -> None:
 
 
 def _render(thread_id: str, box: dict) -> None:
-    """把一次调研画出来：轨道、指标、审核卡、报告、来源台账。"""
+    """把一次调研画出来。"""
     values, interrupted = _snapshot(thread_id)
     # checkpoint 里有的字段（report/sources...）优先用最终结果再覆盖一层（带 metrics）
     result = {**values, **(box.get("result") or {})}
@@ -233,119 +369,47 @@ def _live(thread_id: str, box: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 侧栏与会话管理
+# 页面
 # ---------------------------------------------------------------------------
 
-def _fill_question(question: str) -> None:
-    """示例问题按钮的回调：在 widget 实例化之前改它的值，避免 Streamlit 报错。"""
-    st.session_state.question = question
+def _home() -> None:
+    st.html(theme.brand_bar(_index_count()))
+    st.html(theme.intro())
+    with st.container(key="askcard"):
+        _ask_form("ask")
+    _examples()
+    _history()
+    st.markdown(
+        f'<div class="dr-footer">model · {escape(settings.model_name)}'
+        f"　|　checkpoint · {escape(settings.checkpoint_db)}</div>",
+        unsafe_allow_html=True,
+    )
 
 
-def _switch_run(index: int) -> None:
-    st.session_state.current = index
-
-
-def _current_run() -> dict | None:
-    runs = st.session_state.runs
-    if not runs:
-        return None
-    index = st.session_state.current
-    if not 0 <= index < len(runs):
-        index = 0
-        st.session_state.current = 0
-    return runs[index]
-
-
-def _init_state() -> None:
-    st.session_state.setdefault("question", "")
-    st.session_state.setdefault("review", False)
-    st.session_state.setdefault("runs", [])
-    st.session_state.setdefault("current", 0)
-
-    # 支持 ?thread=<id> 直接打开某次调研（方便把一次结果发给别人看）
-    thread = st.query_params.get("thread")
-    if thread and not any(r["thread_id"] == thread for r in st.session_state.runs):
-        st.session_state.runs.append(
-            {
-                "thread_id": thread,
-                "question": f"会话 {thread}",
-                "created": "",
-                "box": {"status": "done"},
-            }
+def _detail(run: dict) -> None:
+    # 返回首页的图标放在左上角，紧挨品牌栏
+    nav_col, brand_col = st.columns([1, 16], vertical_alignment="center")
+    with nav_col, st.container(key="homebtn"):
+        st.button(
+            "",
+            icon=":material/arrow_back:",
+            type="tertiary",
+            help="返回首页",
+            key="go-home",
+            on_click=_go_home,
         )
-        st.session_state.current = len(st.session_state.runs) - 1
+    with brand_col:
+        st.html(theme.brand_bar(_index_count()))
 
+    st.markdown(
+        f'<div class="dr-current-q">正在看 · <strong>{escape(run["question"])}</strong></div>',
+        unsafe_allow_html=True,
+    )
 
-def _sidebar() -> None:
-    api_ready = bool(settings.openai_api_key)
-    runs = st.session_state.runs
-
-    with st.sidebar:
-        st.markdown('<div class="dr-side-label">提问</div>', unsafe_allow_html=True)
-        with st.form("ask", clear_on_submit=False, border=False):
-            question = st.text_area(
-                "调研问题",
-                key="question",
-                height=104,
-                placeholder="例如：RAG 和微调应该怎么选？",
-                label_visibility="collapsed",
-            )
-            review = st.toggle("生成后先人工审核", key="review")
-            submitted = st.form_submit_button(
-                "开始调研",
-                type="primary",
-                use_container_width=True,
-                disabled=not api_ready,
-            )
-
-        if not api_ready:
-            st.warning(
-                "还没配置模型 API key：把 .env.example 复制成 .env，"
-                "填入 OPENAI_API_KEY 后重启本页。",
-                icon=None,
-            )
-
-        if submitted:
-            text = (question or "").strip()
-            if len(text) < 2:
-                st.error("问题太短了，写清楚一点再提交。")
-            else:
-                _start_run(text, review)
-                st.rerun()
-
-        if not runs:
-            st.markdown(
-                '<div class="dr-side-label">可以这样问</div>', unsafe_allow_html=True
-            )
-            for i, example in enumerate(EXAMPLE_QUESTIONS):
-                st.button(
-                    example,
-                    key=f"example-{i}",
-                    use_container_width=True,
-                    on_click=_fill_question,
-                    args=(example,),
-                )
-        else:
-            st.markdown('<div class="dr-side-label">本次会话</div>', unsafe_allow_html=True)
-            for i, run in enumerate(runs[:8]):
-                label = run["question"] if len(run["question"]) <= 22 else run["question"][:22] + "…"
-                if run["box"].get("status") == "running":
-                    label = "· " + label
-                st.button(
-                    label,
-                    key=f"run-{run['thread_id']}",
-                    use_container_width=True,
-                    on_click=_switch_run,
-                    args=(i,),
-                )
-
-        current = runs[st.session_state.current]["thread_id"] if runs else "—"
-        st.markdown(
-            f'<div class="dr-session">thread · {current}<br>'
-            f"model · {settings.model_name}<br>"
-            f"checkpoint · {settings.checkpoint_db}</div>",
-            unsafe_allow_html=True,
-        )
+    if run["box"].get("status") == "running":
+        _live(run["thread_id"], run["box"])   # 运行中：自动刷新
+    else:
+        _render(run["thread_id"], run["box"])  # 跑完了：静态展示
 
 
 def main() -> None:
@@ -353,24 +417,24 @@ def main() -> None:
         page_title="DeepResearch · 调研工作台",
         page_icon=":material/library_books:",
         layout="wide",
-        initial_sidebar_state="expanded",
+        initial_sidebar_state="collapsed",
     )
     st.markdown(theme.CSS, unsafe_allow_html=True)
 
     _init_state()
-    _sidebar()
 
-    st.html(theme.brand_bar(_index_count()))
+    if not settings.openai_api_key:
+        st.warning(
+            "还没配置模型 API key：把 .env.example 复制成 .env，"
+            "填入 OPENAI_API_KEY 后重启本页。",
+            icon=None,
+        )
 
-    run = _current_run()
+    run = _find_run(st.session_state.view)
     if run is None:
-        st.html(theme.intro())
-        return
-
-    if run["box"].get("status") == "running":
-        _live(run["thread_id"], run["box"])   # 运行中：自动刷新
+        _home()
     else:
-        _render(run["thread_id"], run["box"])  # 跑完了：静态展示
+        _detail(run)
 
 
 if __name__ == "__main__":
